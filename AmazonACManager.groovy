@@ -4,9 +4,9 @@ definition(
     author: "Ilia Gilderman",
     description: "Creates child devices using a custom driver",
     category: "My Apps",
-    iconUrl: "https://raw.githubusercontent.com/gilderman/AmazonAC/temp.svgh",
+    iconUrl: "https://raw.githubusercontent.com/gilderman/Amazon-Thermostat/icon.svg",
     iconX2Url: "",
-	importUrl: "https://raw.githubusercontent.com/gilderman/AmazonAC/main/apps/AmazonACManager.groovy",
+    importUrl: "https://github.com/gilderman/Amazon-Thermostat/blob/main/AmazonACManager.groovy",
     oauth: false,
     singleInstance: false,
     installOnOpen: true
