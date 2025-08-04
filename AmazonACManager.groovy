@@ -7,7 +7,7 @@ definition(
     iconUrl: "https://raw.githubusercontent.com/gilderman/Amazon-Thermostat/icon.svg",
     iconX2Url: "",
     importUrl: "https://github.com/gilderman/Amazon-Thermostat/blob/main/AmazonACManager.groovy",
-    oauth: false,
+    oauth: true,
     singleInstance: false,
     installOnOpen: true
 )
@@ -25,6 +25,20 @@ def mainPage() {
         section("Create ACs") {
             input "createButton", "button", title: "Create Devices"
         }
+		
+		section("App URLs") {
+            paragraph "Cloud ${getFullApiServerUrl()}"
+            paragraph "Local ${getLocalApiServerUrl()}"
+            paragraph "AccessToken ${state.accessToken}"
+       }
+    }
+}
+
+mappings {
+    path("/statusreportfromtheapp") {
+        action: [
+            POST: "statusCallback"
+        ]
     }
 }
 
@@ -43,6 +57,9 @@ def initialize() {
 def appButtonHandler(btn) {
     if (btn == "createButton") {
         createChildDevices()
+		
+		if (state.accessToken == null)
+			createAccessToken()
     }
 }
 
@@ -70,6 +87,64 @@ def createChildDevices() {
             dev.initialize(name)
         } else {
             log.info "⏩ Device '${name}' already exists (DNI: ${dni}) — skipping"
+        }
+    }
+}
+
+def statusCallback() {
+	def payload = request.JSON
+    log.debug "Received callback from the app: ${payload}"  
+	
+	updateThermostats(payload)
+}
+
+def updateThermostats(List<Map> dataList) {
+    dataList.each { entry ->
+        def name = entry.name
+        def mode = entry.mode?.toLowerCase()
+        def temp = entry.currentTemp?.replaceAll(/[^\d.]/, '') as Double
+
+        def child = getChildDevices().find { it.label == name }
+        if (!child) {
+            log.warn "No child device found with name '$name'"
+            return
+        }
+
+        log.debug "Updating '$name': mode=$mode, temp=$temp, raw target=${entry.target}"
+
+        child.sendEvent(name: "temperature", value: temp)
+        child.sendEvent(name: "thermostatMode", value: mode)
+
+        switch (mode) {
+            case "heat":
+                def targetVal = entry.target?.replaceAll(/[^\d.]/, '') as Double
+                if (targetVal != null) {
+                    child.sendEvent(name: "heatingSetpoint", value: targetVal)
+                }
+                break
+            case "cool":
+                def targetVal = entry.target?.replaceAll(/[^\d.]/, '') as Double
+                if (targetVal != null) {
+                    child.sendEvent(name: "coolingSetpoint", value: targetVal)
+                }
+                break
+            case "auto":
+                def range = entry.target?.findAll(/\d+/)
+                if (range?.size() == 2) {
+                    def low = range[0] as Double
+                    def high = range[1] as Double
+                    child.sendEvent(name: "heatingSetpoint", value: low)
+                    child.sendEvent(name: "coolingSetpoint", value: high)
+                    log.debug "Auto mode range: heat=$low, cool=$high"
+                } else {
+                    log.warn "Could not parse auto mode range for '$name': ${entry.target}"
+                }
+                break
+            case "off":
+                // no setpoints updated
+                break
+            default:
+                log.warn "Unknown mode: $mode"
         }
     }
 }
