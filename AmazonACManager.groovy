@@ -20,6 +20,8 @@ def mainPage() {
     dynamicPage(name: "mainPage", title: "Amazon AC Manager", install: true, uninstall: true) {
         section("Select Speach Device") {
             input name: "selectedSpeachDevice", type: "capability.speechSynthesis", title: "Select Devices", multiple: false, required: true
+			input name: "thermostatNames", type: "string", title: "Names of the thermostats as they appear in the Alexa app, separated by comma", required: true
+            input name: "thermostatHeatNames", type: "string", title: "Names of the thermostats floor heaters as they appear in the Alexa app, separated by comma", required: true
         }
         
         section("Create ACs") {
@@ -68,9 +70,13 @@ def getSelectedSpeachDevice() {
 }
 
 def createChildDevices() {
-    def deviceNames = ["Rec Room", "Main Hall", "Guest Bedroom", "Office", "Master Bedroom", "Sheli's Bedroom", "Tami's Bedroom", "Neta's Bedroom"] 
-	def driverName = "Control Amazon Thermostat through Alexa commands"
-  
+    createChildDevicesForDriver(thermostatNames, "Amazon Thermostat (via alexa)")
+    createChildDevicesForDriver(thermostatHeatNames, "Amazon Thermostat Heating (via alexa)")
+}
+
+def createChildDevicesForDriver(thermostats, driverName) {
+	def deviceNames = thermostats.split(",").collect { it.trim() }
+	
     deviceNames.each { name ->
         def dni = "123|auto-${name.replaceAll('[^a-zA-Z0-9]', '_').toLowerCase()}"
         def dev = getChildDevice(dni)
@@ -84,7 +90,7 @@ def createChildDevices() {
                 [label: "[VIR] ${name}", isComponent: false],
             )
             log.info "✅ Created device: ${dev.displayName} (DNI: ${dni}), acDeviceName: ${name}"
-            dev.initialize(name)
+            dev.initialize()
         } else {
             log.info "⏩ Device '${name}' already exists (DNI: ${dni}) — skipping"
         }
