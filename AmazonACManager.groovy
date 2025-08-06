@@ -110,7 +110,7 @@ def updateThermostats(List<Map> dataList) {
         def mode = entry.mode?.toLowerCase()
         def temp = entry.currentTemp?.replaceAll(/[^\d.]/, '') as Double
 
-        def child = getChildDevices().find { it.label == name }
+        def child = getChildDevices().find {  it.label.endsWith(name) }
         if (!child) {
             log.warn "No child device found with name '$name'"
             return
