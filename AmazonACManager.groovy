@@ -54,6 +54,8 @@ def updated() {
 
 def initialize() {
     log.debug "App initialized"
+    
+    state.totalDevices = thermostatNames?.split(/\s*,\s*/).size() ?: 0 + thermostatHeatNames?.split(/\s*,\s*/).size() ?: 0
 }
 
 def appButtonHandler(btn) {
@@ -101,7 +103,12 @@ def statusCallback() {
 	def payload = request.JSON
     log.debug "Received callback from the app: ${payload}"  
 	
-	updateThermostats(payload)
+    
+    if (payload.size == state.totalDevices)
+    	updateThermostats(payload)
+    else {
+        log.warn "Bad payload recieved"
+    }
 }
 
 def updateThermostats(List<Map> dataList) {

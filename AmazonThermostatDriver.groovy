@@ -1,3 +1,5 @@
+#include gilderman.AmazonACManagerHelper
+
 metadata {
     definition(name: "Amazon Thermostat (via alexa)", namespace: "gilderman", author: "Ilia Gilderman") {
 		capability "Thermostat"
@@ -6,6 +8,7 @@ metadata {
         capability "ThermostatFanMode"
 		capability "RelativeHumidityMeasurement"
 		capability "ThermostatMode"
+        capability "ThermostatOperatingState"
         
         capability "TemperatureMeasurement"
         capability "Sensor"
@@ -71,12 +74,6 @@ metadata {
  *
  */
 
-private void logDebug(String msg) {
-    if (debugLogging) {
-        log.debug msg
-    }
-}
-
 def installed() {
     initialize()
 }
@@ -100,21 +97,9 @@ def initialize() {
     configure()
 }
 
-def executeCommand(cmd, state, value) {
-    sendEvent(name: state, value:value)
-    sendAlexaCommand(cmd, value)
-}
-
-def setHeatingSetpoint(temp) {
-    executeCommand("Set the heating setpoint for the %s thermostat to %d degrees", "heatingSetpoint", temp)
-}
-
 def setCoolingSetpoint(temp) {
     executeCommand("Set the cooling setpoint for the %s thermostat to %d degrees", "coolingSetpoint", temp)
-}
-
-def setThermostatMode(mode) {
-	executeCommand("Set the %s thermostat to %s", "thermostatMode", mode)
+    updateOperatingState()
 }
 
 def setThermostatFanMode(String mode) {
@@ -124,28 +109,4 @@ def setThermostatFanMode(String mode) {
 def updateHumidity(value) {
 	logDebug("Setting humidity to ${value}")
     sendEvent(name: "humidity", value: value, unit: "%")
-}
-
-def updateTemperature(value) {
-    logDebug("Setting temperature to ${value}°")
-    sendEvent(name: "temperature", value: value, unit: "°F") // or "°C"
-}
-
-def sendAlexaCommand(String cmd, param = null) {
-    def dev = parent?.getSelectedSpeachDevice()
-    if (dev) {
-        logDebug "Command ${cmd}"
-        logDebug "name ${acDeviceName}"
-        logDebug "param ${param}"
-        
-		def fullCmd = String.format(cmd, acDeviceName, param)
-        logDebug "Calling '${fullCmd}' on device ${dev.displayName}"
-		dev.voiceCmdAsText(fullCmd)
-        try {
-        } catch (Exception e) {
-            log.warn "Failed to run '${fullCmd}' on ${dev.displayName}: ${e.message}"
-        }
-    } else {
-        log.warn "No device with speechSynthesis capabilty selected"
-    }
 }
