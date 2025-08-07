@@ -25,38 +25,9 @@ metadata {
 	preferences {
 		input name: "acDeviceName", type: "string", title: "Name of the Heating device", required: true
 		input name: "debugLogging", type: "bool", title: "Enable debug logging", defaultValue: true
+        input name: "autoOffHours", type: "number", title: "Auto-Off Time (hours)", description: "Turn off after this many hours", defaultValue: 3, range: "0..24"
 	}
 }
-
-/*
- * Possible Alexa thermostat commands
- *
- * ==== SET TEMPERATURE ====
- * Set the %s thermostat to %d degrees
- * Set the heat on the %s thermostat to %d degrees
- *
- * ==== INCREASE / DECREASE TEMPERATURE ====
- * Increase the temperature on the %s thermostat
- * Decrease the temperature on the %s thermostat
- * Increase the temperature on the %s thermostat by %d degrees
- * Decrease the temperature on the %s thermostat by %d degrees
- *
- * ==== MODE CHANGE ====
- * Set the %s thermostat to %s
- * Set the %s thermostat to heat
- * Set the %s thermostat to auto
- * Turn off the %s thermostat
- *
- * ==== QUERY / STATUS ====
- * What’s the temperature on the %s thermostat?
- * What mode is the %s thermostat in?
- * What is the %s thermostat set to?
- *
- *  ==== SPECIAL CASES ====
- * Turn on the %s thermostat
- * Turn off the %s thermostat
- *
- */
 
 def installed() {
     initialize()

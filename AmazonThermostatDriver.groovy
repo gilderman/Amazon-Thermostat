@@ -35,45 +35,6 @@ metadata {
 	}
 }
 
-/*
- * Possible Alexa thermostat commands
- *
- * ==== SET TEMPERATURE ====
- * Set the %s thermostat to %d degrees
- * Set the heat on the %s thermostat to %d degrees
- * Set the cool on the %s thermostat to %d degrees
- *
- * ==== INCREASE / DECREASE TEMPERATURE ====
- * Increase the temperature on the %s thermostat
- * Decrease the temperature on the %s thermostat
- * Increase the temperature on the %s thermostat by %d degrees
- * Decrease the temperature on the %s thermostat by %d degrees
- *
- * ==== MODE CHANGE ====
- * Set the %s thermostat to %s
- * Set the %s thermostat to heat
- * Set the %s thermostat to cool
- * Set the %s thermostat to auto
- * Turn off the %s thermostat
- *
- * ==== FAN MODE ====
- * Set % fan mode to auto
- * Set % fan mode to circulate
- * Set % fan mode to off
- * Set % fan mode to off
- * Set % fan mode to %s
- *
- * ==== QUERY / STATUS ====
- * What’s the temperature on the %s thermostat?
- * What mode is the %s thermostat in?
- * What is the %s thermostat set to?
- *
- *  ==== SPECIAL CASES ====
- * Turn on the %s thermostat
- * Turn off the %s thermostat
- *
- */
-
 def installed() {
     initialize()
 }

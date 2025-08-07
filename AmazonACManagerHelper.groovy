@@ -27,6 +27,22 @@ def setHeatingSetpoint(temp) {
 def setThermostatMode(mode) {
 	executeCommand("Set the %s thermostat to %s", "thermostatMode", mode)
     updateOperatingState()
+    
+    logDebug "Mode = ${mode} autoOffHours=${autoOffHours}"
+    
+    if (mode in ["heat", "cool", "auto"] && autoOffHours?.toInteger() > 0) {
+        def seconds = autoOffHours.toInteger() * 3600
+        runIn(seconds, autoTurnOff)
+        logDebug "Auto-off scheduled in ${autoOffHours} hour(s)"
+    } else {
+        unschedule("autoTurnOff")
+        logDebug "Auto-off canceled"
+    }
+}
+
+def autoTurnOff() {
+    logDebug "Auto-turning off thermostat"
+    setThermostatMode("off")
 }
 
 def updateTemperature(value) {
