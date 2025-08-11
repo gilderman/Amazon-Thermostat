@@ -45,17 +45,29 @@ mappings {
 }
 
 def installed() {
-    initialize()
+    log.debug "Installed with settings: ${settings}"
+    if (settings?.thermostatNames && settings?.thermostatHeatNames) {
+        initialize()
+    }
 }
 
 def updated() {
-    initialize()
+    log.debug "Updated with settings: ${settings}"
+    if (settings?.thermostatNames && settings?.thermostatHeatNames) {
+        unsubscribe()
+        unschedule()
+        initialize()
+    }
 }
 
 def initialize() {
     log.debug "App initialized"
-    
-    state.totalDevices = thermostatNames?.split(/\s*,\s*/).size() ?: 0 + thermostatHeatNames?.split(/\s*,\s*/).size() ?: 0
+
+    def count1 = thermostatNames?.split(/\s*,\s*/)?.size() ?: 0
+    def count2 = thermostatHeatNames?.split(/\s*,\s*/)?.size() ?: 0
+    state.totalDevices = count1 + count2
+
+    log.debug "Total devices: ${state.totalDevices}"
 }
 
 def appButtonHandler(btn) {
@@ -107,7 +119,7 @@ def statusCallback() {
     if (payload.size == state.totalDevices)
     	updateThermostats(payload)
     else {
-        log.warn "Bad payload recieved"
+        log.warn "Bad payload recieved ${payload.size} ${state.totalDevices}"
     }
 }
 
