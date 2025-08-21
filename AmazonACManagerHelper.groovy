@@ -25,6 +25,7 @@ def setHeatingSetpoint(temp) {
 }
 
 def setThermostatMode(mode) {
+    logDebug "AC ManagerHelper: Set thermostat mode ${mode}"
 	executeCommand("Set the %s thermostat to %s", "thermostatMode", mode)
     updateOperatingState()
     
@@ -75,9 +76,10 @@ def updateOperatingState() {
     def heatSetpoint = device.currentValue("heatingSetpoint") as Double
     def coolSetpoint = device.currentValue("coolingSetpoint") as Double
     def mode = device.currentValue("thermostatMode")
+    def state = device.currentValue("thermostatOperatingState")
 
     String newState = "idle"
-    logDebug "Operating state before change to mode=$mode (Current: $currentTemp, Heat: $heatSetpoint, Cool: $coolSetpoint)"
+    //logDebug "AC ManagerHelper: Operating state before change to mode=$mode state=$state (Current: $currentTemp, Heat: $heatSetpoint, Cool: $coolSetpoint)"
 
     switch (mode) {
         case "heat":
@@ -103,9 +105,10 @@ def updateOperatingState() {
     }
 
     // Only send event if state has changed
-    if (device.currentValue("thermostatOperatingState") != newState) {
+    //logDebug "AC ManagerHelper: Operating state after change to mode=$mode state=$newState (Current: $currentTemp, Heat: $heatSetpoint, Cool: $coolSetpoint)"
+    if (state != newState) {
         sendEvent(name: "thermostatOperatingState", value: newState)
-        logDebug "Operating state changed to $newState (Current: $currentTemp, Heat: $heatSetpoint, Cool: $coolSetpoint)"
+        //logDebug "Operating state changed to $newState (Current: $currentTemp, Heat: $heatSetpoint, Cool: $coolSetpoint)"
     }
 }
 

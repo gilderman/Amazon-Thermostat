@@ -27,6 +27,7 @@ metadata {
         attribute "coolingSetpoint", "number"
         
         attribute "supportedThermostatModes", "ENUM", ["off", "heat", "cool", "auto"]
+        attribute "supportedThermostatFanModes", "ENUM", ["off", "on", "auto"]
 	}
 		
 	preferences {
@@ -48,6 +49,7 @@ def configure() {
     sendEvent(name: "coolingSetpoint", value: 75)
     sendEvent(name: "thermostatMode", value: "off")
     sendEvent(name: "supportedThermostatModes", value: ["off", "heat", "cool", "auto"])
+    sendEvent(name: "supportedThermostatFanModes", value: ["off", "on", "auto"])
 	sendEvent(name: "thermostatFanMode", value: "auto")
 }
 

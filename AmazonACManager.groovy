@@ -113,7 +113,7 @@ def createChildDevicesForDriver(thermostats, driverName) {
 
 def statusCallback() {
 	def payload = request.JSON
-    log.debug "Received callback from the app: ${payload}"  
+    //log.debug "Received callback from the app: ${payload}"  
 	
     
     if (payload.size == state.totalDevices)
@@ -121,6 +121,15 @@ def statusCallback() {
     else {
         log.warn "Bad payload recieved ${payload.size} ${state.totalDevices}"
     }
+}
+
+def logAllStates(device) {
+    log.debug "=== States for ${device.displayName} ==="
+    device.supportedAttributes.each { attr ->
+        def current = device.currentValue(attr.name)
+        log.debug "${attr.name}: ${current}"
+    }
+    log.debug "=============================="
 }
 
 def updateThermostats(List<Map> dataList) {
@@ -135,7 +144,7 @@ def updateThermostats(List<Map> dataList) {
             return
         }
 
-        log.debug "Updating '$name': mode=$mode, temp=$temp, raw target=${entry.target}"
+        //log.debug "AC Manager: Updating '$name': mode=$mode, temp=$temp, raw target=${entry.target}"
 
         child.sendEvent(name: "temperature", value: temp)
         child.sendEvent(name: "thermostatMode", value: mode)
@@ -171,5 +180,8 @@ def updateThermostats(List<Map> dataList) {
             default:
                 log.warn "Unknown mode: $mode"
         }
+        
+        //logAllStates(child)
+        child.updateOperatingState()
     }
 }
