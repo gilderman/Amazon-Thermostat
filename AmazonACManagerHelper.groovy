@@ -148,13 +148,12 @@ def pollAlexaThermostats() {
         doAlexaListRequest(headers)
         return
     }
-    def cookieUrl = settings?.cookieServerUrl?.trim()
-    if (cookieUrl) {
-        logDebug "Fetching cookie from cookie server: ${cookieUrl}"
-        def idx = cookieUrl.indexOf('://')
-        def pathStart = idx >= 0 ? cookieUrl.indexOf('/', idx + 3) : -1
-        def base = pathStart > 0 ? cookieUrl.substring(0, pathStart) : cookieUrl
-        def path = pathStart > 0 ? cookieUrl.substring(pathStart) : '/'
+    def addr = settings?.cookieServerUrl?.trim()
+    if (addr) {
+        logDebug "Fetching cookie from cookie server"
+        def matcher = (addr =~ /^(https?:\/\/[^\/]+)(\/.*)?$/)
+        def base = matcher ? matcher[0][1] : addr
+        def path = (matcher && matcher[0][2]) ? matcher[0][2] : '/'
         asynchttpGet('cookieFetchedCallback', [uri: base, path: path, timeout: 10])
         return
     }
