@@ -1,0 +1,21 @@
+---
+description: After pushing code, wait for Docker package build and report result
+alwaysApply: false
+globs: "**"
+---
+
+# Push and Wait for Build
+
+When the user asks to **push** code (or "push the changes", "push and build", etc.):
+
+1. Run `git add`, `git commit`, `git push` as needed.
+2. **Wait for the Docker workflow** – After push, the "Build and Push Docker Image" workflow may run (if `alexa-downchannel/**` or `.github/workflows/docker-publish.yml` changed). Run:
+   ```
+   gh run watch --workflow=docker-publish.yml --exit-status
+   ```
+   This blocks until the workflow completes and exits with the run's status.
+3. **Report back**:
+   - **Success**: "Package built and pushed to ghcr.io/gilderman/amazon-thermostat:latest. Refresh on prod: `.\run-with-env.ps1`"
+   - **Failure**: "Build failed. Check https://github.com/gilderman/Amazon-Thermostat/actions"
+
+If `gh` CLI is not available or fails, fetch the actions page after a short delay and report the latest run status.

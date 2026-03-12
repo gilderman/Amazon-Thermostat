@@ -111,7 +111,10 @@ async function refreshCookie() {
 }
 
 async function fetchThermostatState() {
-  if (!cookieData || !bearerToken) return [];
+  if (!cookieData || !bearerToken) {
+    log('warn', 'No cookie/bearerToken - COOKIE_SERVER_URL unreachable or cookie fetch failed');
+    return [];
+  }
   const headers = {
     'Cookie': cookieData,
     'csrf': csrf,
@@ -130,6 +133,10 @@ async function fetchThermostatState() {
     body: listBody
   });
   const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
+  if (!endpoints.length) {
+    const errs = listRes?.errors || listRes?.data?.listEndpoints?.errors;
+    log('warn', 'Alexa listEndpoints empty. Response:', JSON.stringify(listRes).slice(0, 300) + (JSON.stringify(listRes).length > 300 ? '...' : ''));
+  }
   const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
   let thermostats = endpoints.filter(ep => {
     const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
@@ -142,7 +149,11 @@ async function fetchThermostatState() {
   }
   if (!thermostats.length) thermostats = endpoints.filter(ep =>
     thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()));
-  if (!thermostats.length) return [];
+  if (!thermostats.length) {
+    const names = endpoints.map(e => `${(e.friendlyName || '?')} [${(e.displayCategories?.primary?.value || '?')}]`).join(', ');
+    log('warn', `No thermostats found. Endpoints: ${endpoints.length}. Names: ${names || 'none'}. THERMOSTAT_NAMES=${THERMOSTAT_NAMES.join(',') || 'any'}`);
+    return [];
+  }
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
   const stateBody = JSON.stringify({
     query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name ... on ThermostatMode { value } ... on Setpoint { value { value scale } } ... on TemperatureSensor { value { value scale } } } } } } }`
@@ -327,9 +338,14 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
   if (path === '/poll') {
+    log('info', 'Poll requested');
     fetchThermostatState().then(async (payload) => {
+      if (!cookieData || !bearerToken) log('warn', 'Poll: No cookie (COOKIE_SERVER_URL unreachable or empty?)');
       if (payload.length) {
         pushToHubitat(payload).catch(e => log('warn', 'Hubitat push failed:', e.message));
+        log('info', `Poll: ${payload.length} thermostat(s)`);
+      } else {
+        log('warn', 'Poll: No thermostats (cookie missing, or none match THERMOSTAT_NAMES?)');
       }
       res.statusCode = 200;
       res.end(JSON.stringify({ ok: true, thermostats: payload }));
