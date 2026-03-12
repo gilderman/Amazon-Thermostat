@@ -1,7 +1,7 @@
 #include gilderman.AmazonACManagerHelper
 
 metadata {
-    definition(name: "Amazon Thermostat (via alexa)", namespace: "gilderman", author: "Ilia Gilderman") {
+    definition(name: "Amazon Thermostat", namespace: "gilderman", author: "Ilia Gilderman") {
 		capability "Thermostat"
         capability "ThermostatHeatingSetpoint"
         capability "ThermostatCoolingSetpoint"
