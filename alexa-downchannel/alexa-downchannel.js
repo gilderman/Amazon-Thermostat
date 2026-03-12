@@ -142,7 +142,7 @@ async function fetchThermostatState() {
   if (!thermostats.length) return [];
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
   const stateBody = JSON.stringify({
-    query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name value } } } } }`
+    query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name ... on ThermostatMode { value } ... on Setpoint { value { value scale } } ... on TemperatureSensor { value { value scale } } } } } } }`
   });
   const stateRes = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
     method: 'POST',
@@ -158,7 +158,7 @@ async function fetchThermostatState() {
         const v = prop.value;
         const val = v && typeof v === 'object' && 'value' in v ? v.value : v;
         const scale = v && typeof v === 'object' ? v.scale : null;
-        const numVal = typeof val === 'number' ? val : (val != null ? parseFloat(String(val).replace(/[^\d.]/g, '')) : null;
+        const numVal = typeof val === 'number' ? val : (val != null ? parseFloat(String(val).replace(/[^\d.]/g, '')) : null);
         const display = val != null ? (scale ? `${val}° ${(scale || '').slice(0, 1)}` : `${val}`) : null;
         switch (prop.name) {
           case 'thermostatMode': state.mode = (val || 'OFF').toString().toLowerCase(); break;
@@ -305,6 +305,20 @@ const httpServer = http.createServer((req, res) => {
     refreshCookie().then((ok) => {
       res.statusCode = ok ? 200 : 500;
       res.end(JSON.stringify({ ok }));
+    });
+    return;
+  }
+  if (path === '/poll') {
+    fetchThermostatState().then(async (payload) => {
+      if (payload.length) {
+        pushToHubitat(payload).catch(e => log('warn', 'Hubitat push failed:', e.message));
+      }
+      res.statusCode = 200;
+      res.end(JSON.stringify({ ok: true, thermostats: payload }));
+    }).catch(e => {
+      log('error', 'Poll failed:', e.message);
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: e.message }));
     });
     return;
   }

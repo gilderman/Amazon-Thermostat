@@ -30,6 +30,7 @@ def mainPage() {
             paragraph "Use manual cookie OR cookie server URL — one required for polling. Echo Speaks Docker: use http://HOST:8091/cookieData (include /cookieData)."
             input name: "alexaCookie", type: "text", title: "Manual cookie (optional)", description: "Paste full Cookie header from DevTools", required: false
             input name: "cookieServerUrl", type: "string", title: "Cookie server URL", description: "Echo Speaks: http://HOST:8091/cookieData — or Hubitat /cookie", required: false
+            input name: "downchannelServerUrl", type: "string", title: "Downchannel server URL (optional)", description: "e.g. http://192.168.21.100:3099 — routes poll via local proxy, fixes 408 errors from Hubitat→Alexa TLS issues", required: false
             input name: "pollIntervalMinutes", type: "number", title: "Poll interval (minutes)", description: "How often to poll Alexa for thermostat state", defaultValue: 2, range: "1..15"
             input name: "useFastPoll", type: "bool", title: "Fast poll (near real-time)", description: "Poll every 30 sec instead of interval. Simulates push notifications in Groovy.", defaultValue: false
             input name: "alexaApiTimeoutSeconds", type: "number", title: "Alexa API timeout (sec)", description: "Request timeout. Try increasing if 408 timeout errors.", defaultValue: 30, range: "15..120"

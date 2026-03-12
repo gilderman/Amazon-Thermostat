@@ -150,6 +150,13 @@ def scheduleNextPollIfNeeded() {
 
 def pollAlexaThermostats() {
     logDebug "[Poll] Starting. t0=${now()}"
+    def proxyUrl = settings?.downchannelServerUrl?.trim()?.replaceAll(/\/+$/, '')
+    if (proxyUrl) {
+        def timeoutSec = getAlexaApiTimeout()
+        logDebug "[Poll] Using downchannel proxy: ${proxyUrl}/poll (timeout ${timeoutSec}s)"
+        asynchttpGet('proxyPollCallback', [uri: "${proxyUrl}/poll", timeout: timeoutSec])
+        return
+    }
     def headers = getAlexaHeaders()
     if (headers) {
         logDebug "[Poll] Cookie from cache/config → list request"
@@ -165,6 +172,38 @@ def pollAlexaThermostats() {
         return
     }
     logDebug "[Poll] No cookie source. Set manual cookie or cookie server URL."
+}
+
+def proxyPollCallback(resp, data) {
+    def status = 0
+    def json = null
+    try { status = resp?.status ?: 0 } catch (e) { status = 0 }
+    logDebug "[Poll] Proxy callback: HTTP ${status}"
+    if (status != 200) {
+        log.warn "[Poll] Proxy poll failed: HTTP ${status}"
+        state.lastPollResult = "Proxy failed: HTTP ${status}"
+        state.lastPollTime = now()
+        scheduleNextPollIfNeeded()
+        return
+    }
+    try { json = resp?.json } catch (e) {
+        log.warn "[Poll] Proxy parse error: ${e.message}"
+        state.lastPollResult = "Proxy parse error"
+        state.lastPollTime = now()
+        scheduleNextPollIfNeeded()
+        return
+    }
+    def payload = json?.thermostats ?: []
+    if (payload) {
+        state.lastPollResult = "OK"
+        state.lastPollTime = now()
+        state.lastPollThermostats = payload.collect { it.name }
+        updateThermostats(payload)
+    } else {
+        state.lastPollResult = "No data from proxy"
+        state.lastPollTime = now()
+    }
+    scheduleNextPollIfNeeded()
 }
 
 def cookieFetchedCallback(resp, data) {
