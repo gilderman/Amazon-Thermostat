@@ -151,10 +151,7 @@ def pollAlexaThermostats() {
     def cookieUrl = settings?.cookieServerUrl?.trim()
     if (cookieUrl) {
         logDebug "Fetching cookie from cookie server: ${cookieUrl}"
-        def uri = cookieUrl.toURI()
-        def base = "${uri.scheme}://${uri.host}${uri.port > 0 && uri.port != 80 && uri.port != 443 ? ':' + uri.port : ''}"
-        def path = (uri.path ?: '/') + (uri.query ? "?${uri.query}" : '')
-        asynchttpGet('cookieFetchedCallback', [uri: base, path: path, timeout: 10])
+        asynchttpGet('cookieFetchedCallback', [uri: cookieUrl, timeout: 10])
         return
     }
     logDebug "No Alexa cookie source. Set manual cookie or cookie server URL."
