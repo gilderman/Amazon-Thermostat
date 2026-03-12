@@ -108,9 +108,36 @@ Content-Type: application/json
 
 ---
 
-## Health Check
+## HTTP Endpoints
 
-Use the ping endpoint for Docker health checks or monitoring:
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/ping` or `/health` | Health check. Returns `{status, downchannel, cookie}`. |
+| `GET` | `/refresh` | Re-fetch the Alexa cookie from `COOKIE_SERVER_URL`. |
+| `GET` | `/poll` | Fetch current thermostat state from Alexa, return as JSON, and push to Hubitat if `HUBITAT_*` vars are set. Used by the Hubitat app when **Downchannel server URL** is configured. |
+
+### `/poll` response
+
+```json
+{
+  "ok": true,
+  "thermostats": [
+    {
+      "name": "Living Room Thermostat",
+      "endpointId": "amzn1.ask.account.xxx...",
+      "mode": "cool",
+      "currentTemp": "74° F",
+      "target": "72° F",
+      "lowerSetpoint": null,
+      "upperSetpoint": null
+    }
+  ]
+}
+```
+
+---
+
+## Health Check
 
 ```bash
 curl http://localhost:3099/ping
