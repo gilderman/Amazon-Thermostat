@@ -22,7 +22,7 @@ Alexa thermostat integration for Hubitat. Uses the **direct Alexa Smart Home API
 1. **Install the app** in Hubitat: Amazon AC Manager
 2. **Cookie** – pick one:
    - **Manual cookie**: From browser DevTools (alexa.amazon.com → Application → Cookies), paste the full Cookie header.
-   - **Cookie server URL**: Full URL that returns `{ cookie, csrf }` — same as downchannel bridge `COOKIE_SERVER_URL`.
+   - **Cookie server URL**: Full URL, e.g. `http://YOUR_SERVER:8091/cookieData` for Echo Speaks Docker. Must include `/cookieData` path.
 3. **Configure thermostat names** as they appear in the Alexa app (comma-separated).
 4. **Create devices** via the Create Devices button.
 

@@ -20,21 +20,31 @@ preferences {
 
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Amazon AC Manager", install: true, uninstall: true) {
+        section("Cookie Status") {
+            paragraph getCookieStatusText()
+        }
+        section("Poll Status") {
+            paragraph getPollStatusText()
+        }
         section("Alexa Cookie (direct API auth)") {
-            paragraph "Use manual cookie OR cookie server URL — one required for polling. Same URL as downchannel bridge COOKIE_SERVER_URL."
+            paragraph "Use manual cookie OR cookie server URL — one required for polling. Echo Speaks Docker: use http://HOST:8091/cookieData (include /cookieData)."
             input name: "alexaCookie", type: "text", title: "Manual cookie (optional)", description: "Paste full Cookie header from DevTools", required: false
-            input name: "cookieServerUrl", type: "string", title: "Cookie server URL", description: "Full URL returning { cookie, csrf } — same as bridge", required: false
+            input name: "cookieServerUrl", type: "string", title: "Cookie server URL", description: "Echo Speaks: http://HOST:8091/cookieData — or Hubitat /cookie", required: false
             input name: "pollIntervalMinutes", type: "number", title: "Poll interval (minutes)", description: "How often to poll Alexa for thermostat state", defaultValue: 2, range: "1..15"
             input name: "useFastPoll", type: "bool", title: "Fast poll (near real-time)", description: "Poll every 30 sec instead of interval. Simulates push notifications in Groovy.", defaultValue: false
+            input name: "alexaApiTimeoutSeconds", type: "number", title: "Alexa API timeout (sec)", description: "Request timeout. Try increasing if 408 timeout errors.", defaultValue: 30, range: "15..120"
+            paragraph "Test result appears in Logs (Info level)."
+            input "testCookieButton", "button", title: "Test Cookie Fetch"
         }
         section("Thermostats (AC/HVAC)") {
             input name: "thermostatNames", type: "string", title: "Names as in Alexa app (comma‑separated)", required: true
+            input "pollNowButton", "button", title: "Poll Now"
         }
         section("Create ACs") {
             input "createButton", "button", title: "Create Devices"
         }
         section("Debug") {
-            input name: "debugLog", type: "bool", title: "Debug logging", defaultValue: false
+            input name: "debugLog", type: "bool", title: "Debug logging", description: "Show [Poll] timing and flow in logs (enable Debug in Live Logs)", defaultValue: false
         }
     }
 }
@@ -50,6 +60,22 @@ mappings {
             POST: "statusCallback"
         ]
     }
+}
+
+def getAlexaHeadersForCommand() {
+    def cookie = null
+    def csrfVal = ''
+    if (settings?.alexaCookie?.trim()) {
+        cookie = settings.alexaCookie.trim()
+        def m = (cookie =~ /(?i)(?:^|;\s*)csrf=([^;]+)/)
+        csrfVal = m.find() ? m.group(1).trim() : ''
+    } else if (state?.cookieFromServer?.cookie) {
+        cookie = state.cookieFromServer.cookie
+        csrfVal = state.cookieFromServer?.csrf ?: ''
+    }
+    if (!cookie?.trim()) return null
+    return ['Cookie': cookie, 'csrf': csrfVal, 'Accept': 'application/json', 'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36', 'Referer': 'https://alexa.amazon.com/', 'Origin': 'https://alexa.amazon.com']
 }
 
 def installed() {
@@ -92,10 +118,90 @@ def initialize() {
 def appButtonHandler(btn) {
     if (btn == "createButton") {
         createChildDevices()
-		
 		if (state.accessToken == null)
 			createAccessToken()
+    } else if (btn == "testCookieButton") {
+        testCookieFetch()
+    } else if (btn == "pollNowButton") {
+        log.info "Manual poll triggered"
+        pollAlexaThermostats()
     }
+}
+
+def testCookieFetch() {
+    if (settings?.alexaCookie?.trim()) {
+        state.lastCookieTestResult = "Manual cookie configured"
+        state.lastCookieTestTime = now()
+        log.info("Manual cookie is configured. No fetch needed.")
+        return
+    }
+    def cookieServer = settings?.cookieServerUrl?.trim()
+    if (!cookieServer) {
+        state.lastCookieTestResult = "Not configured"
+        state.lastCookieTestTime = now()
+        log.info("Configure cookie server URL first.")
+        return
+    }
+    cookieServer = normalizeCookieServerUrl(cookieServer)
+    log.info "Cookie fetch URL: ${cookieServer}"
+    asynchttpGet('cookieTestCallback', [uri: cookieServer, timeout: 30])
+}
+
+def cookieTestCallback(resp, data) {
+    def msg
+    if (resp.status == 200) {
+        def json = resp.json
+        if (!json) {
+            try { json = new groovy.json.JsonSlurper().parseText(resp.data ?: '{}') }
+            catch (e) { msg = "Parse error: ${e.message}"; log.warn msg }
+        }
+        if (json) {
+            def cd = json.cookieData ?: json
+            def cookie = cd.localCookie ?: cd.cookie
+            def csrfVal = cd.csrf ?: ''
+            if (cookie) {
+                def hasToken = (cookie =~ /(?i)at-main=/).find()
+                msg = hasToken ? "Cookie fetch OK. Bearer token present." : "Cookie fetch OK but at-main may be missing."
+                state.cookieFromServer = [cookie: cookie, csrf: csrfVal, fetchedAt: now()]
+            } else {
+                msg = "Cookie server returned no cookie or localCookie."
+            }
+        }
+    } else {
+        msg = "Cookie fetch failed: HTTP ${resp.status}"
+    }
+    msg = msg ?: "Cookie fetch failed."
+    state.lastCookieTestResult = msg
+    state.lastCookieTestTime = now()
+    log.info msg
+}
+
+def normalizeCookieServerUrl(url) {
+    if (!url?.trim()) return url
+    url = url.trim().replaceAll(/\/+$/, '')
+    if (url ==~ /.*:8091$/) return url + '/cookieData'
+    return url
+}
+
+def getPollStatusText() {
+    def result = state.lastPollResult
+    if (!result) return "Last poll: —"
+    def ts = state.lastPollTime ? new Date(state.lastPollTime as Long).format("yyyy-MM-dd HH:mm") : ""
+    def ok = (result == "OK")
+    def names = state.lastPollThermostats ? " (${state.lastPollThermostats.join(', ')})" : ""
+    return "Last poll: ${ok ? 'OK' : result}${names}${ts ? " @ ${ts}" : ""}"
+}
+
+def getCookieStatusText() {
+    def hasManual = settings?.alexaCookie?.trim()
+    def hasServer = settings?.cookieServerUrl?.trim()
+    def source = hasManual ? "Manual cookie configured ✓" : (hasServer ? "Cookie server configured ✓" : "⚠ Not configured — set cookie or server URL")
+    def testInfo = state.lastCookieTestResult
+    if (!testInfo) return "Status: ${source}"
+    def ts = state.lastCookieTestTime ? new Date(state.lastCookieTestTime as Long).format("HH:mm") : ""
+    def ok = testInfo.contains("OK") || testInfo.contains("Bearer token present") || testInfo == "Manual cookie configured"
+    def result = ok ? "OK" : (testInfo == "Not configured" ? "" : "FAIL: " + (testInfo.length() > 35 ? testInfo.take(35) + "..." : testInfo))
+    return "Status: ${source}  |  Last test: ${result}${ts ? " (${ts})" : ""}"
 }
 
 def createChildDevices() {
@@ -117,6 +223,7 @@ def createChildDevicesForDriver(thermostats, driverName) {
                 location.hubs[0].id,
                 [label: "[VIR] ${name}", isComponent: false],
             )
+            dev.updateSetting("acDeviceName", [value: name, type: "string"])
             log.info "✅ Created device: ${dev.displayName} (DNI: ${dni}), acDeviceName: ${name}"
         } else {
             log.info "⏩ Device '${name}' already exists (DNI: ${dni}) — refreshing"
@@ -172,7 +279,7 @@ def updateThermostats(List<Map> dataList) {
         def mode = entry.mode?.toLowerCase()
         def temp = entry.currentTemp?.replaceAll(/[^\d.]/, '') as Double
 
-        def child = getChildDevices().find { it.label.endsWith(name) }
+        def child = getChildDevices().find { (it.label ?: '').toLowerCase().endsWith((name ?: '').toLowerCase()) }
         if (!child) {
             log.warn "No child device found with name '$name'"
             return

@@ -62,7 +62,7 @@ def sendAlexaCommand(String state, value) {
     }
 }
 
-private static String stateToAlexaCommand(String state) {
+def stateToAlexaCommand(String state) {
     switch (state) {
         case 'heatingSetpoint': return 'setHeatingSetpoint'
         case 'coolingSetpoint': return 'setCoolingSetpoint'
@@ -115,16 +115,22 @@ def updateOperatingState() {
 
 // ─── Alexa API (used by app when helper is included) ─────────────────────────
 
-private getAlexaHeaders() {
+def COOKIE_TTL_MS = 5 * 24 * 60 * 60 * 1000L  // 5 days – cookie good for many days, re-fetch only when stale
+
+def getAlexaHeaders() {
     def cookie = null
     def csrf = ''
     if (settings?.alexaCookie?.trim()) {
         cookie = settings.alexaCookie.trim()
         def m = (cookie =~ /(?i)(?:^|;\s*)csrf=([^;]+)/)
         csrf = m.find() ? m.group(1).trim() : ''
-    } else if (state?.cookieFromServer?.cookie && state?.cookieFromServer?.csrf) {
-        cookie = state.cookieFromServer.cookie
-        csrf = state.cookieFromServer.csrf ?: ''
+    } else if (state?.cookieFromServer?.cookie) {
+        def fetchedAt = state.cookieFromServer?.fetchedAt as Long ?: 0L
+        if (fetchedAt <= 0 || (now() - fetchedAt) < COOKIE_TTL_MS) {
+            cookie = state.cookieFromServer.cookie
+            csrf = state.cookieFromServer?.csrf ?: ''
+        }
+        // else: cookie stale (>5 days) – will trigger re-fetch on next poll
     }
     if (!cookie?.trim()) return null
     return [
@@ -138,26 +144,32 @@ private getAlexaHeaders() {
     ]
 }
 
-private scheduleNextPollIfNeeded() {
+def scheduleNextPollIfNeeded() {
     if (settings?.useFastPoll) runIn(30, 'pollAlexaThermostats')
 }
 
 def pollAlexaThermostats() {
+    logDebug "[Poll] Starting. t0=${now()}"
     def headers = getAlexaHeaders()
     if (headers) {
+        logDebug "[Poll] Cookie from cache/config → list request"
         doAlexaListRequest(headers)
         return
     }
     def cookieUrl = settings?.cookieServerUrl?.trim()
     if (cookieUrl) {
-        logDebug "Fetching cookie from cookie server: ${cookieUrl}"
-        asynchttpGet('cookieFetchedCallback', [uri: cookieUrl, timeout: 10])
+        cookieUrl = normalizeCookieServerUrl(cookieUrl)
+        state.cookieFetchStart = now()
+        logDebug "[Poll] Fetching cookie from ${cookieUrl}"
+        asynchttpGet('cookieFetchedCallback', [uri: cookieUrl, timeout: 30])
         return
     }
-    logDebug "No Alexa cookie source. Set manual cookie or cookie server URL."
+    logDebug "[Poll] No cookie source. Set manual cookie or cookie server URL."
 }
 
 def cookieFetchedCallback(resp, data) {
+    def t0 = state.cookieFetchStart as Long ?: now()
+    logDebug "[Poll] Cookie fetch callback: HTTP ${resp.status} (elapsed ${(now() - t0) / 1000}s)"
     if (resp.status != 200) {
         log.warn "Cookie server request failed: ${resp.status}"
         scheduleNextPollIfNeeded()
@@ -176,43 +188,108 @@ def cookieFetchedCallback(resp, data) {
         scheduleNextPollIfNeeded()
         return
     }
-    state.cookieFromServer = [cookie: localCookie, csrf: csrfVal]
-    logDebug "Cookie fetched from cookie server"
+    state.cookieFromServer = [cookie: localCookie, csrf: csrfVal, fetchedAt: now()]
+    log.info "Cookie cached (valid ~5 days). → list request"
     doAlexaListRequest(getAlexaHeaders())
 }
 
-private doAlexaListRequest(headers) {
+def getAlexaApiTimeout() {
+    def sec = (settings?.alexaApiTimeoutSeconds as Integer) ?: 30
+    return Math.max(15, Math.min(120, sec))
+}
+
+def doAlexaListRequest(headers) {
+    def timeoutSec = getAlexaApiTimeout()
+    logDebug "[Poll] List request -> alexa.amazon.com (timeout ${timeoutSec}s)"
+    state.pollListStart = now()
     def query = '{"query":"{ listEndpoints(listEndpointsInput: {}) { endpoints { id friendlyName displayCategories { primary { value } } } } }"}'
     asynchttpPost('alexaListCallback', [
         uri: 'https://alexa.amazon.com', path: '/nexus/v1/graphql',
-        headers: headers, body: query, timeout: 15
+        headers: headers, body: query, timeout: timeoutSec
     ], [step: 'list'])
 }
 
 def alexaListCallback(resp, data) {
-    if (resp.status != 200 || !resp.json) { logDebug "Alexa list request failed: ${resp.status}"; scheduleNextPollIfNeeded(); return }
-    def endpoints = resp.json?.data?.listEndpoints?.endpoints ?: []
+    def status = 0
+    def respData = null
+    def json = null
+    try { status = resp?.status ?: 0 } catch (e) { status = 0 }
+    try { respData = resp?.data } catch (e) { respData = null }
+    try { json = resp?.json } catch (e) {
+        def snippet = respData ? respData.toString().take(150) : ''
+        log.warn "[Poll] List failed: HTTP ${status}. No JSON (${e.message}). Body: ${snippet ?: 'empty'}"
+        state.lastPollResult = "List failed: HTTP ${status} (no JSON)"
+        state.lastPollTime = now()
+        scheduleNextPollIfNeeded()
+        return
+    }
+    def elapsed = state.pollListStart ? ((now() - (state.pollListStart as Long)) / 1000) : null
+    logDebug "[Poll] List callback: HTTP ${status}${elapsed != null ? " (${elapsed}s)" : ''}"
+    if (status != 200 || !json) {
+        state.lastPollResult = "List failed: HTTP ${status}"
+        state.lastPollTime = now()
+        def snippet = ''
+        try { if (respData) snippet = ", data=${respData.toString().take(200)}" } catch (e2) { }
+        log.warn "[Poll] List failed: status=${status}${snippet}"
+        scheduleNextPollIfNeeded(); return
+    }
+    def endpoints = json?.data?.listEndpoints?.endpoints ?: []
     def thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR']
     def thermostats = endpoints.findAll { ep ->
         def cat = ep.displayCategories?.primary?.value ?: ''
         thermoCategories.contains(cat.toUpperCase()) || (ep.friendlyName ?: '').toLowerCase().contains('thermostat')
     }
-    if (thermostats.isEmpty()) { logDebug "No thermostats found in Alexa"; scheduleNextPollIfNeeded(); return }
+    if (thermostats.isEmpty()) {
+        state.lastPollResult = "No thermostats in Alexa"
+        state.lastPollTime = now()
+        logDebug "No thermostats found in Alexa"; scheduleNextPollIfNeeded(); return
+    }
     def targetNames = (settings?.thermostatNames ?: '').split(',').collect { it.trim().toLowerCase() }.findAll { it }
     if (targetNames) thermostats = thermostats.findAll { t -> targetNames.contains((t.friendlyName ?: '').toLowerCase()) }
     if (thermostats.isEmpty()) thermostats = endpoints.findAll { ep -> thermoCategories.contains((ep.displayCategories?.primary?.value ?: '').toUpperCase()) }
+    if (targetNames && thermostats.isEmpty()) {
+        state.lastPollResult = "No match for: ${targetNames.join(', ')}"
+        state.lastPollTime = now()
+        scheduleNextPollIfNeeded(); return
+    }
     if (thermostats.isEmpty()) { scheduleNextPollIfNeeded(); return }
     def ids = thermostats.collect { "\"${it.id}\"" }.join(', ')
+    def timeoutSec = getAlexaApiTimeout()
+    logDebug "[Poll] State request -> alexa.amazon.com (timeout ${timeoutSec}s)"
+    state.pollStateStart = now()
     def stateQuery = "{\"query\":\"{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name value } } } } }\"}"
     asynchttpPost('alexaStateCallback', [
         uri: 'https://alexa.amazon.com', path: '/nexus/v1/graphql',
-        headers: getAlexaHeaders(), body: stateQuery, timeout: 15
+        headers: getAlexaHeaders(), body: stateQuery, timeout: timeoutSec
     ], [thermostats: thermostats])
 }
 
 def alexaStateCallback(resp, data) {
-    if (resp.status != 200 || !resp.json) return
-    def endpoints = resp.json?.data?.listEndpoints?.endpoints ?: []
+    def status = 0
+    def json = null
+    def respData = null
+    try { status = resp?.status ?: 0 } catch (e) { status = 0 }
+    try { respData = resp?.data } catch (e) { respData = null }
+    try { json = resp?.json } catch (e) {
+        def snip = respData ? respData.toString().take(150) : 'no body'
+        log.warn "[Poll] State callback: ${e.message}. HTTP ${status}, body: ${snip}..."
+        state.lastPollResult = "State failed: HTTP ${status} (no JSON)"
+        state.lastPollTime = now()
+        scheduleNextPollIfNeeded()
+        return
+    }
+    def elapsed = state.pollStateStart ? ((now() - (state.pollStateStart as Long)) / 1000) : null
+    logDebug "[Poll] State callback: HTTP ${status}${elapsed != null ? " (${elapsed}s)" : ''}"
+    if (status != 200 || !json) {
+        state.lastPollResult = "State failed: HTTP ${status}"
+        state.lastPollTime = now()
+        def snippet = ''
+        try { if (respData) snippet = ", data=${respData.toString().take(200)}" } catch (e2) { }
+        log.warn "[Poll] State failed: status=${status}${snippet}"
+        scheduleNextPollIfNeeded()
+        return
+    }
+    def endpoints = json?.data?.listEndpoints?.endpoints ?: []
     def thermostats = data.thermostats ?: []
     def payload = []
     endpoints.each { ep ->
@@ -237,14 +314,25 @@ def alexaStateCallback(resp, data) {
         def t = thermostats.find { it.id == ep.id }
         if (t) payload << [name: t.friendlyName, endpointId: ep.id, mode: state.mode, currentTemp: state.currentTemp, target: state.target, lowerSetpoint: state.lowerSetpoint, upperSetpoint: state.upperSetpoint]
     }
-    if (payload) updateThermostats(payload)
+    if (payload) {
+        state.lastPollResult = "OK"
+        state.lastPollTime = now()
+        state.lastPollThermostats = payload.collect { it.name }
+        updateThermostats(payload)
+    } else {
+        state.lastPollResult = "No data"
+        state.lastPollTime = now()
+    }
     scheduleNextPollIfNeeded()
 }
 
 def sendCommandToAlexa(String deviceName, String command, value) {
-    def headers = getAlexaHeaders()
-    if (!headers) { log.warn "No Alexa cookie. Configure in app settings."; return false }
-    def child = getChildDevices().find { (it.label ?: '').endsWith(deviceName) }
+    def headers = getAlexaHeadersForCommand()
+    if (!headers) {
+        log.warn "No Alexa cookie for command. Run Test Cookie Fetch then try again."
+        return false
+    }
+    def child = getChildDevices().find { (it.label ?: '').toLowerCase().endsWith((deviceName ?: '').toLowerCase()) }
     def endpointId = child?.getDataValue('endpointId')
     if (!endpointId) { log.warn "No endpointId for '$deviceName' yet. Poll once to discover."; return false }
     def payload = null
@@ -263,11 +351,12 @@ def sendCommandToAlexa(String deviceName, String command, value) {
         variables: [input: [featureControlRequests: [[endpointId: endpointId, featureName: 'thermostat', featureOperationName: featureOp, payload: payload]]]]
     ])
     try {
-        httpPost([uri: 'https://alexa.amazon.com', path: '/nexus/v1/graphql', headers: headers, body: reqBody, timeout: 15]) { resp ->
+        httpPost([uri: 'https://alexa.amazon.com', path: '/nexus/v1/graphql', headers: headers, body: reqBody, timeout: getAlexaApiTimeout()]) { resp ->
             if (resp.status >= 200 && resp.status < 300) logDebug "Alexa command: $command $value for $deviceName"
             else log.warn "Alexa API error: ${resp.status} ${resp.data}"
         }
         return true
     } catch (e) { log.warn "Alexa command failed: ${e.message}"; return false }
 }
+
 

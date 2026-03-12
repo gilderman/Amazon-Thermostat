@@ -16,6 +16,10 @@ metadata {
 		command "setHeatingSetpoint", ["number"]
         command "setCoolingSetpoint", ["number"]
         command "setThermostatMode", ["string"]
+		command "heat"
+		command "cool"
+		command "auto"
+		command "off"
 		command "setThermostatFanMode", ["string"]
 		command "updateTemperature", ["number"]
 		command "updateHumidity", ["number"]
@@ -64,6 +68,11 @@ def setCoolingSetpoint(temp) {
     executeCommand("coolingSetpoint", temp)
     updateOperatingState()
 }
+
+def heat() { setThermostatMode("heat") }
+def cool() { setThermostatMode("cool") }
+def auto() { setThermostatMode("auto") }
+def off() { setThermostatMode("off") }
 
 def setThermostatFanMode(String mode) {
     executeCommand("thermostatFanMode", mode)
