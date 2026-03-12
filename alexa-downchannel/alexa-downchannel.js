@@ -46,6 +46,21 @@ function log(level, ...args) {
   }
 }
 
+function mask(s, keep = 4) {
+  if (!s || s.length <= keep) return s ? '***' : '-';
+  return s.slice(0, keep) + '...' + s.slice(-2);
+}
+
+function logEnvAndCookieStatus() {
+  log('info', 'Env: COOKIE_SERVER_URL=' + (COOKIE_SERVER_URL || '-'));
+  log('info', 'Env: HUBITAT_URL=' + (HUBITAT_URL ? mask(HUBITAT_URL, 20) : '-'));
+  log('info', 'Env: HUBITAT_APP_ID=' + (HUBITAT_APP_ID ? mask(HUBITAT_APP_ID, 4) : '-'));
+  log('info', 'Env: HUBITAT_ACCESS_TOKEN=' + (HUBITAT_ACCESS_TOKEN ? 'set' : '-'));
+  log('info', 'Env: THERMOSTAT_NAMES=' + (THERMOSTAT_NAMES.length ? THERMOSTAT_NAMES.join(',') : 'any'));
+  log('info', 'Env: ALEXA_REGION=' + ALEXA_REGION + ', SKIP_DOWNCHANNEL=' + SKIP_DOWNCHANNEL + ', LOG_LEVEL=' + LOG_LEVEL + ', PORT=' + PORT);
+  log('info', 'Cookie: cookieData=' + (cookieData ? 'present' : '-') + ', bearerToken=' + (bearerToken ? 'present' : '-') + ', csrf=' + (csrf ? 'present' : '-'));
+}
+
 function extractBearerToken(cookieStr) {
   const m = cookieStr.match(/(?:^|;\s*)at-main=([^;]+)/i);
   return m ? decodeURIComponent(m[1]) : '';
@@ -102,10 +117,10 @@ async function refreshCookie() {
     csrf = data.csrf || extractCsrf(cookieData);
     bearerToken = extractBearerToken(cookieData);
     if (!bearerToken) throw new Error('Could not extract Bearer token (at-main) from cookie');
-    log('info', 'Cookie refreshed successfully');
+    log('info', 'Cookie status: OK (bearerToken present, csrf ' + (csrf ? 'present' : 'empty') + ')');
     return true;
   } catch (e) {
-    log('error', 'Cookie refresh failed:', e.message);
+    log('error', 'Cookie status: FAIL -', e.message);
     return false;
   }
 }
@@ -326,7 +341,31 @@ const httpServer = http.createServer((req, res) => {
     res.end(JSON.stringify({
       status: 'ok',
       downchannel: !!downchannelStream,
-      cookie: !!cookieData
+      cookie: !!cookieData,
+      bearerToken: !!bearerToken
+    }));
+    return;
+  }
+  if (path === '/status') {
+    res.statusCode = 200;
+    res.end(JSON.stringify({
+      env: {
+        COOKIE_SERVER_URL: COOKIE_SERVER_URL ? 'set' : 'not set',
+        HUBITAT_URL: HUBITAT_URL ? 'set' : 'not set',
+        HUBITAT_APP_ID: HUBITAT_APP_ID ? 'set' : 'not set',
+        HUBITAT_ACCESS_TOKEN: HUBITAT_ACCESS_TOKEN ? 'set' : 'not set',
+        THERMOSTAT_NAMES: THERMOSTAT_NAMES.length ? THERMOSTAT_NAMES : '(any)',
+        ALEXA_REGION: ALEXA_REGION,
+        SKIP_DOWNCHANNEL: !!SKIP_DOWNCHANNEL,
+        LOG_LEVEL: LOG_LEVEL,
+        PORT: PORT
+      },
+      cookie: {
+        present: !!cookieData,
+        bearerToken: !!bearerToken,
+        csrf: !!csrf
+      },
+      downchannel: !!downchannelStream
     }));
     return;
   }
@@ -360,9 +399,29 @@ const httpServer = http.createServer((req, res) => {
   res.end(JSON.stringify({ error: 'Not found' }));
 });
 
+function maskSecret(s, show = 4) {
+  if (!s || s.length <= show) return s ? '***' : '(not set)';
+  return s.slice(0, Math.min(show, 2)) + '***' + s.slice(-2);
+}
+
+function logStartupConfig() {
+  log('info', '--- Config from env ---');
+  log('info', `  COOKIE_SERVER_URL: ${COOKIE_SERVER_URL || '(not set)'}`);
+  log('info', `  HUBITAT_URL: ${HUBITAT_URL ? maskSecret(HUBITAT_URL, 30) : '(not set)'}`);
+  log('info', `  HUBITAT_APP_ID: ${HUBITAT_APP_ID ? maskSecret(HUBITAT_APP_ID, 8) : '(not set)'}`);
+  log('info', `  HUBITAT_ACCESS_TOKEN: ${HUBITAT_ACCESS_TOKEN ? '***set***' : '(not set)'}`);
+  log('info', `  THERMOSTAT_NAMES: ${THERMOSTAT_NAMES.length ? THERMOSTAT_NAMES.join(', ') : '(any)'}`);
+  log('info', `  ALEXA_REGION: ${ALEXA_REGION}`);
+  log('info', `  SKIP_DOWNCHANNEL: ${SKIP_DOWNCHANNEL}`);
+  log('info', `  LOG_LEVEL: ${LOG_LEVEL}`);
+  log('info', `  PORT: ${PORT}`);
+  log('info', '------------------------');
+}
+
 httpServer.listen(PORT, () => {
   log('info', `Alexa Downchannel Server listening on port ${PORT}`);
   log('info', `Ping: http://localhost:${PORT}/ping`);
+  logStartupConfig();
   if (!COOKIE_SERVER_URL) log('warn', 'COOKIE_SERVER_URL not set - cookie fetch will fail');
   if (!HUBITAT_URL || !HUBITAT_APP_ID || !HUBITAT_ACCESS_TOKEN) log('warn', 'HUBITAT_* not set - callback push will fail');
   startDownchannel();
