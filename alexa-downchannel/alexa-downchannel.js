@@ -20,11 +20,21 @@ const SKIP_DOWNCHANNEL = /^(1|true|yes)$/i.test(process.env.SKIP_DOWNCHANNEL || 
 const BOB_HOST = ALEXA_REGION === 'eu' ? 'bob-dispatch-prod-eu.amazon.com' : 'bob-dispatch-prod-na.amazon.com';
 const DIRECTIVES_PATH = '/v20160207/directives';
 
-const COOKIE_SERVER_URL = (process.env.COOKIE_SERVER_URL || '').replace(/\/$/, '');
+const COOKIE_SERVER_URL_RAW = (process.env.COOKIE_SERVER_URL || '').replace(/\/$/, '');
 const HUBITAT_URL = (process.env.HUBITAT_URL || '').replace(/\/$/, '');
 const HUBITAT_APP_ID = process.env.HUBITAT_APP_ID || '';
 const HUBITAT_ACCESS_TOKEN = process.env.HUBITAT_ACCESS_TOKEN || '';
 const THERMOSTAT_NAMES = (process.env.THERMOSTAT_NAMES || '').split(',').map(s => s.trim()).filter(Boolean);
+
+/** Use COOKIE_SERVER_URL if set, else Hubitat app /cookie (same cookie list-thermostats uses). */
+function getCookieServerUrl() {
+  if (COOKIE_SERVER_URL_RAW) return COOKIE_SERVER_URL_RAW;
+  if (HUBITAT_URL && HUBITAT_APP_ID && HUBITAT_ACCESS_TOKEN) {
+    return `${HUBITAT_URL}/apps/api/${HUBITAT_APP_ID}/cookie?access_token=${HUBITAT_ACCESS_TOKEN}`;
+  }
+  return '';
+}
+const COOKIE_SERVER_URL = getCookieServerUrl();
 
 let cookieData = null;
 let csrf = '';
@@ -406,7 +416,8 @@ function maskSecret(s, show = 4) {
 
 function logStartupConfig() {
   log('info', '--- Config from env ---');
-  log('info', `  COOKIE_SERVER_URL: ${COOKIE_SERVER_URL || '(not set)'}`);
+  const cookieSrc = COOKIE_SERVER_URL_RAW ? 'explicit' : (COOKIE_SERVER_URL ? 'Hubitat app /cookie' : 'not set');
+  log('info', `  COOKIE_SERVER_URL: ${COOKIE_SERVER_URL ? maskSecret(COOKIE_SERVER_URL, 40) + ' (' + cookieSrc + ')' : '(not set)'}`);
   log('info', `  HUBITAT_URL: ${HUBITAT_URL ? maskSecret(HUBITAT_URL, 30) : '(not set)'}`);
   log('info', `  HUBITAT_APP_ID: ${HUBITAT_APP_ID ? maskSecret(HUBITAT_APP_ID, 8) : '(not set)'}`);
   log('info', `  HUBITAT_ACCESS_TOKEN: ${HUBITAT_ACCESS_TOKEN ? '***set***' : '(not set)'}`);

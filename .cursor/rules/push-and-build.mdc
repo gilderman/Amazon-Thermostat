@@ -9,13 +9,14 @@ globs: "**"
 When the user asks to **push** code (or "push the changes", "push and build", etc.):
 
 1. Run `git add`, `git commit`, `git push` as needed.
-2. **Wait for the Docker workflow** – After push, the "Build and Push Docker Image" workflow may run (if `alexa-downchannel/**` or `.github/workflows/docker-publish.yml` changed). Run:
+2. **Wait for the Docker build** – Do not return until the package is built. Use:
    ```
-   gh run watch --workflow=docker-publish.yml --exit-status
+   .\push-and-wait.ps1 -Message "your message"
    ```
-   This blocks until the workflow completes and exits with the run's status.
-3. **Report back**:
-   - **Success**: "Package built and pushed to ghcr.io/gilderman/amazon-thermostat:latest. Refresh on prod: `.\run-with-env.ps1`"
+   This script commits, pushes, and **blocks** until the Docker workflow finishes (success or failure).
+3. If using git/gh manually instead of the script:
+   - Use `gh run watch --workflow=docker-publish.yml --exit-status` (blocks until done)
+   - If `gh` is not available: poll `https://api.github.com/repos/gilderman/Amazon-Thermostat/actions/workflows/docker-publish.yml/runs` until the run for the pushed commit has `status: completed`
+4. **Report back** only after the build completes:
+   - **Success**: "Package built and pushed. Refresh on prod: `.\PS\run-with-env.ps1`"
    - **Failure**: "Build failed. Check https://github.com/gilderman/Amazon-Thermostat/actions"
-
-If `gh` CLI is not available or fails, fetch the actions page after a short delay and report the latest run status.

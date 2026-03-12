@@ -193,7 +193,7 @@ services:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `COOKIE_SERVER_URL` | **Yes** | URL that returns Alexa cookie. Use Hubitat app `/cookie` endpoint. |
+| `COOKIE_SERVER_URL` | No* | URL that returns Alexa cookie (Echo Speaks: `http://host:8091/cookieData`). Omit to use Hubitat app `/cookie` (same source as list-thermostats). |
 | `HUBITAT_URL` | **Yes** | Hubitat base URL (e.g. `https://xxx.hubitat.cloud` or `http://192.168.1.50`). |
 | `HUBITAT_APP_ID` | **Yes** | Amazon AC Manager app instance ID. |
 | `HUBITAT_ACCESS_TOKEN` | **Yes** | OAuth access token from the app (create via app settings). |
@@ -205,13 +205,9 @@ services:
 
 ### Cookie Server URL
 
-Use the Hubitat Amazon AC Manager app's cookie endpoint:
+**Preferred**: Omit `COOKIE_SERVER_URL` and set `HUBITAT_URL`, `HUBITAT_APP_ID`, `HUBITAT_ACCESS_TOKEN`. The server will fetch the cookie from the Hubitat app's `/cookie` endpoint — the same source `list-thermostats.js` uses when it works.
 
-```
-https://your-hub-id.hubitat.cloud/apps/api/YOUR_APP_ID/cookie?access_token=YOUR_TOKEN
-```
-
-Must return JSON with `cookie` and optionally `csrf`.
+**Alternative**: Set `COOKIE_SERVER_URL` explicitly (e.g. Echo Speaks: `http://host:8091/cookieData`). Response must include `cookie` or `localCookie`, and optionally `csrf`.
 
 ---
 

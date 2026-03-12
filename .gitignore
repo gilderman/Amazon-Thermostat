@@ -28,6 +28,7 @@ build/
 
 # PS scripts (local prod setup, not committed)
 PS/
+push-and-wait.ps1
 
 # Cursor (optional: remove if you want to commit rules)
 # .cursor/
