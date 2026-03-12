@@ -130,7 +130,7 @@ def cookieEndpoint() {
 	def csrfVal = ''
 	if (settings?.alexaCookie?.trim()) {
 		cookie = settings.alexaCookie.trim()
-		def m = (cookie =~ /(?:^|;\s*)csrf=([^;]+)/i)
+		def m = (cookie =~ /(?i)(?:^|;\s*)csrf=([^;]+)/)
 		csrfVal = m.find() ? m.group(1).trim() : ''
 	} else if (state?.cookieFromServer?.cookie && state?.cookieFromServer?.csrf) {
 		cookie = state.cookieFromServer.cookie

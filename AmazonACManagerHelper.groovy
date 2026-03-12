@@ -120,7 +120,7 @@ private getAlexaHeaders() {
     def csrf = ''
     if (settings?.alexaCookie?.trim()) {
         cookie = settings.alexaCookie.trim()
-        def m = (cookie =~ /(?:^|;\s*)csrf=([^;]+)/i)
+        def m = (cookie =~ /(?i)(?:^|;\s*)csrf=([^;]+)/)
         csrf = m.find() ? m.group(1).trim() : ''
     } else if (state?.cookieFromServer?.cookie && state?.cookieFromServer?.csrf) {
         cookie = state.cookieFromServer.cookie
