@@ -31,8 +31,8 @@ metadata {
 	}
 		
 	preferences {
-		input name: "acDeviceName", type: "string", title: "Name of the HVAC/Heating device", required: true
-		input name: "debugLogging", type: "bool", title: "Enable debug logging", defaultValue: true
+		input name: "acDeviceName", type: "string", title: "Name as in Alexa app", description: "Must match exactly", required: true
+		input name: "debugLogging", type: "bool", title: "Enable debug logging", defaultValue: false
 	}
 }
 
@@ -61,12 +61,12 @@ def initialize() {
 }
 
 def setCoolingSetpoint(temp) {
-    executeCommand("Set the cooling setpoint for the %s thermostat to %d degrees", "coolingSetpoint", temp)
+    executeCommand("coolingSetpoint", temp)
     updateOperatingState()
 }
 
 def setThermostatFanMode(String mode) {
-    executeCommand("Set %s fan mode to %s", "thermostatFanMode", mode)
+    executeCommand("thermostatFanMode", mode)
 }
 
 def updateHumidity(value) {

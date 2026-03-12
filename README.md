@@ -1,38 +1,33 @@
 # Amazon-Thermostat
-Alexa based integration with Amazon Thermostat (requires) Echo Speaks
 
+Alexa thermostat integration for Hubitat. Uses the **direct Alexa Smart Home API**.
 
-## Possible Alexa Thermostat Commands
+📖 **[API.md](API.md)** – Full API reference: Alexa GraphQL, downchannel, Hubitat endpoints, payloads.
 
-### 🔥 Set Temperature
-- `Set the {thermostat} thermostat to {degrees} degrees`
-- `Set the heat on the {thermostat} thermostat to {degrees} degrees`
-- `Set the cool on the {thermostat} thermostat to {degrees} degrees`
+## How it works
 
-### ⬆️ Increase / ⬇️ Decrease Temperature
-- `Increase the temperature on the {thermostat} thermostat`
-- `Decrease the temperature on the {thermostat} thermostat`
-- `Increase the temperature on the {thermostat} thermostat by {degrees} degrees`
-- `Decrease the temperature on the {thermostat} thermostat by {degrees} degrees`
+- **Amazon AC Manager** polls the Alexa API (configurable 1–15 min) or receives push updates via the downchannel server
+- **Cookie** from manual paste or cookie server URL (same as downchannel bridge)
+- **Commands** (set temp, mode) go directly to the Alexa API from the app
 
-### 🔄 Mode Change
-- `Set the {thermostat} thermostat to {mode}`
-- `Set the {thermostat} thermostat to heat`
-- `Set the {thermostat} thermostat to cool`
-- `Set the {thermostat} thermostat to auto`
-- `Turn off the {thermostat} thermostat`
+### Polling vs real-time (downchannel)
 
-### 🌬️ Fan Mode
-- `Set {thermostat} fan mode to auto`
-- `Set {thermostat} fan mode to circulate`
-- `Set {thermostat} fan mode to off`
-- `Set {thermostat} fan mode to {mode}`
+| Mode | Latency | Requires |
+|------|---------|----------|
+| **Polling** | 1–15 min (or 30s fast poll) | Hubitat app only |
+| **Real-time** | Instant | [Alexa Downchannel Server](alexa-downchannel/) (Docker/Node) |
 
-### 📊 Query / Status
-- `What’s the temperature on the {thermostat} thermostat?`
-- `What mode is the {thermostat} thermostat in?`
-- `What is the {thermostat} thermostat set to?`
+## Setup
 
-### 🛠 Special Cases
-- `Turn on the {thermostat} thermostat`
-- `Turn off the {thermostat} thermostat`
+1. **Install the app** in Hubitat: Amazon AC Manager
+2. **Cookie** – pick one:
+   - **Manual cookie**: From browser DevTools (alexa.amazon.com → Application → Cookies), paste the full Cookie header.
+   - **Cookie server URL**: Full URL that returns `{ cookie, csrf }` — same as downchannel bridge `COOKIE_SERVER_URL`.
+3. **Configure thermostat names** as they appear in the Alexa app (comma-separated).
+4. **Create devices** via the Create Devices button.
+
+Polling starts automatically. Commands (set temp, mode) go directly to the Alexa API.
+
+### Optional: real-time updates (downchannel server)
+
+Run the [Alexa Downchannel Server](alexa-downchannel/) in Docker. It connects to Alexa's HTTP/2 downchannel and pushes thermostat changes to Hubitat immediately. See [alexa-downchannel/README.md](alexa-downchannel/README.md) for setup.

@@ -1,3 +1,5 @@
+#include gilderman.AmazonACManagerHelper
+
 definition(
     name: "Amazon AC Manager",
     namespace: "gilderman",
@@ -18,25 +20,31 @@ preferences {
 
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Amazon AC Manager", install: true, uninstall: true) {
-        section("Select Speach Device") {
-            input name: "selectedSpeachDevice", type: "capability.speechSynthesis", title: "Select Devices", multiple: false, required: true
-			input name: "thermostatNames", type: "string", title: "Names of the thermostats as they appear in the Alexa app, separated by comma", required: true
-            input name: "thermostatHeatNames", type: "string", title: "Names of the thermostats floor heaters as they appear in the Alexa app, separated by comma", required: true
+        section("Alexa Cookie (direct API auth)") {
+            paragraph "Use manual cookie OR cookie server URL — one required for polling. Same URL as downchannel bridge COOKIE_SERVER_URL."
+            input name: "alexaCookie", type: "text", title: "Manual cookie (optional)", description: "Paste full Cookie header from DevTools", required: false
+            input name: "cookieServerUrl", type: "string", title: "Cookie server URL", description: "Full URL returning { cookie, csrf } — same as bridge", required: false
+            input name: "pollIntervalMinutes", type: "number", title: "Poll interval (minutes)", description: "How often to poll Alexa for thermostat state", defaultValue: 2, range: "1..15"
+            input name: "useFastPoll", type: "bool", title: "Fast poll (near real-time)", description: "Poll every 30 sec instead of interval. Simulates push notifications in Groovy.", defaultValue: false
         }
-        
+        section("Thermostats (AC/HVAC)") {
+            input name: "thermostatNames", type: "string", title: "Names as in Alexa app (comma‑separated)", required: true
+        }
         section("Create ACs") {
             input "createButton", "button", title: "Create Devices"
         }
-		
-		section("App URLs") {
-            paragraph "Cloud ${getFullApiServerUrl()}"
-            paragraph "Local ${getLocalApiServerUrl()}"
-            paragraph "AccessToken ${state.accessToken}"
-       }
+        section("Debug") {
+            input name: "debugLog", type: "bool", title: "Debug logging", defaultValue: false
+        }
     }
 }
 
 mappings {
+    path("/cookie") {
+        action: [
+            GET: "cookieEndpoint"
+        ]
+    }
     path("/statusreportfromtheapp") {
         action: [
             POST: "statusCallback"
@@ -46,14 +54,16 @@ mappings {
 
 def installed() {
     log.debug "Installed with settings: ${settings}"
-    if (settings?.thermostatNames && settings?.thermostatHeatNames) {
+    createAccessToken()
+    if (settings?.thermostatNames) {
         initialize()
     }
 }
 
 def updated() {
     log.debug "Updated with settings: ${settings}"
-    if (settings?.thermostatNames && settings?.thermostatHeatNames) {
+    createAccessToken()
+    if (settings?.thermostatNames) {
         unsubscribe()
         unschedule()
         initialize()
@@ -63,11 +73,20 @@ def updated() {
 def initialize() {
     log.debug "App initialized"
 
-    def count1 = thermostatNames?.split(/\s*,\s*/)?.size() ?: 0
-    def count2 = thermostatHeatNames?.split(/\s*,\s*/)?.size() ?: 0
-    state.totalDevices = count1 + count2
+    state.totalDevices = thermostatNames?.split(/\s*,\s*/)?.size() ?: 0
 
-    log.debug "Total devices: ${state.totalDevices}"
+    unschedule("pollAlexaThermostats")
+    if (settings.useFastPoll) {
+        log.debug "Fast poll mode: every 30 seconds (notification-like updates)"
+    } else {
+        def mins = Math.max(1, Math.min(15, (settings.pollIntervalMinutes as Integer) ?: 2))
+        schedule("0 0/${mins} * * * ?", "pollAlexaThermostats")
+        log.debug "Poll scheduled every ${mins} minute(s)"
+    }
+
+    if (settings.alexaCookie?.trim() || settings.cookieServerUrl?.trim()) {
+        runIn(5, "pollAlexaThermostats")
+    }
 }
 
 def appButtonHandler(btn) {
@@ -79,13 +98,8 @@ def appButtonHandler(btn) {
     }
 }
 
-def getSelectedSpeachDevice() {
-    return settings.selectedSpeachDevice
-}
-
 def createChildDevices() {
     createChildDevicesForDriver(thermostatNames, "Amazon Thermostat (via alexa)")
-    createChildDevicesForDriver(thermostatHeatNames, "Amazon Thermostat Heating (via alexa)")
 }
 
 def createChildDevicesForDriver(thermostats, driverName) {
@@ -104,23 +118,42 @@ def createChildDevicesForDriver(thermostats, driverName) {
                 [label: "[VIR] ${name}", isComponent: false],
             )
             log.info "✅ Created device: ${dev.displayName} (DNI: ${dni}), acDeviceName: ${name}"
-            dev.initialize()
         } else {
-            log.info "⏩ Device '${name}' already exists (DNI: ${dni}) — skipping"
+            log.info "⏩ Device '${name}' already exists (DNI: ${dni}) — refreshing"
         }
+        dev.initialize()
     }
+}
+
+def cookieEndpoint() {
+	def cookie = null
+	def csrfVal = ''
+	if (settings?.alexaCookie?.trim()) {
+		cookie = settings.alexaCookie.trim()
+		def m = (cookie =~ /(?:^|;\s*)csrf=([^;]+)/i)
+		csrfVal = m.find() ? m.group(1).trim() : ''
+	} else if (state?.cookieFromServer?.cookie && state?.cookieFromServer?.csrf) {
+		cookie = state.cookieFromServer.cookie
+		csrfVal = state.cookieFromServer.csrf ?: ''
+	}
+	if (!cookie) {
+		render contentType: "application/json", data: [error: "No cookie configured. Set manual cookie or cookie server URL."], status: 503
+		return
+	}
+	render contentType: "application/json", data: [cookie: cookie, csrf: csrfVal], status: 200
 }
 
 def statusCallback() {
 	def payload = request.JSON
-    //log.debug "Received callback from the app: ${payload}"  
-	
-    
-    if (payload.size == state.totalDevices)
-    	updateThermostats(payload)
-    else {
-        log.warn "Bad payload recieved ${payload.size} ${state.totalDevices}"
+    if (!payload) {
+        log.warn "Empty payload in status callback"
+        return
     }
+    def list = payload instanceof List ? payload : [payload]
+    if (list.size() != state.totalDevices) {
+        log.debug "Received ${list.size()} thermostats (expected ${state.totalDevices})"
+    }
+    updateThermostats(list)
 }
 
 def logAllStates(device) {
@@ -135,16 +168,18 @@ def logAllStates(device) {
 def updateThermostats(List<Map> dataList) {
     dataList.each { entry ->
         def name = entry.name
+        def endpointId = entry.endpointId
         def mode = entry.mode?.toLowerCase()
         def temp = entry.currentTemp?.replaceAll(/[^\d.]/, '') as Double
 
-        def child = getChildDevices().find {  it.label.endsWith(name) }
+        def child = getChildDevices().find { it.label.endsWith(name) }
         if (!child) {
             log.warn "No child device found with name '$name'"
             return
         }
-
-        //log.debug "AC Manager: Updating '$name': mode=$mode, temp=$temp, raw target=${entry.target}"
+        if (endpointId) {
+            child.updateDataValue('endpointId', endpointId)
+        }
 
         child.sendEvent(name: "temperature", value: temp)
         child.sendEvent(name: "thermostatMode", value: mode)
@@ -163,15 +198,21 @@ def updateThermostats(List<Map> dataList) {
                 }
                 break
             case "auto":
-                def range = entry.target?.findAll(/\d+/)
-                if (range?.size() == 2) {
-                    def low = range[0] as Double
-                    def high = range[1] as Double
+                def low = entry.lowerSetpoint
+                def high = entry.upperSetpoint
+                if (low != null && high != null) {
                     child.sendEvent(name: "heatingSetpoint", value: low)
                     child.sendEvent(name: "coolingSetpoint", value: high)
-                    log.debug "Auto mode range: heat=$low, cool=$high"
                 } else {
-                    log.warn "Could not parse auto mode range for '$name': ${entry.target}"
+                    def range = entry.target?.findAll(/[\d.]+/)
+                    if (range?.size() >= 2) {
+                        low = range[0] as Double
+                        high = range[1] as Double
+                        child.sendEvent(name: "heatingSetpoint", value: low)
+                        child.sendEvent(name: "coolingSetpoint", value: high)
+                    } else {
+                        log.warn "Could not parse auto mode range for '$name': ${entry.target}"
+                    }
                 }
                 break
             case "off":
