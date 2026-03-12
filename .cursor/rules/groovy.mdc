@@ -1,0 +1,14 @@
+---
+description: Hubitat Groovy app, driver, and helper patterns
+globs: "**/*.groovy"
+alwaysApply: false
+---
+
+# Hubitat Groovy
+
+- Avoid `private` and `static` — Hubitat has compatibility issues
+- Use `log.debug` / `log.info` / `log.warn`; gate verbose logs with `settings?.debugLog`
+- State: `state.foo = bar` (persists across runs). Settings: `settings?.foo`
+- Async HTTP: `asynchttpPost('callbackName', [uri, path, headers, body, timeout], data)`. Callback gets `(resp, data)`; handle missing `resp.json` / `resp.data` in try-catch
+- Child devices: `getChildDevices()`, `addChildDevice()`, `child.updateDataValue()`, `child.sendEvent()`
+- Header name for CSRF: `'csrf'` (not `x-csrf-token`)

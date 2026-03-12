@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Secrets and env
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Build / dist
+dist/
+build/
+*.tgz
+
+# PS scripts (local prod setup, not committed)
+PS/
+
+# Cursor (optional: remove if you want to commit rules)
+# .cursor/

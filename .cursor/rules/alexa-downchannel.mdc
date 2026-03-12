@@ -1,0 +1,13 @@
+---
+description: Alexa downchannel Node.js server patterns
+globs: "alexa-downchannel/**"
+alwaysApply: false
+---
+
+# alexa-downchannel (Node.js)
+
+- Uses `https`/`http2` stdlib only — no external deps
+- Cookie from env `COOKIE_SERVER_URL`; refresh before downchannel connect
+- GraphQL at `https://alexa.amazon.com/nexus/v1/graphql`; headers: Cookie, csrf, Accept, Content-Type, User-Agent, Referer, Origin
+- Endpoints: `/ping`, `/health`, `/refresh`, `/poll`, `/command`, `/cookieData`
+- Push to Hubitat: POST `{HUBITAT_URL}/apps/api/{APP_ID}/statusreportfromtheapp?access_token=...`

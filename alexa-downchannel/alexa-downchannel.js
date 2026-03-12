@@ -16,6 +16,7 @@ const { URL } = require('url');
 const PORT = parseInt(process.env.PORT || '3099', 10);
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 const ALEXA_REGION = (process.env.ALEXA_REGION || 'na').toLowerCase();
+const SKIP_DOWNCHANNEL = /^(1|true|yes)$/i.test(process.env.SKIP_DOWNCHANNEL || '');
 const BOB_HOST = ALEXA_REGION === 'eu' ? 'bob-dispatch-prod-eu.amazon.com' : 'bob-dispatch-prod-na.amazon.com';
 const DIRECTIVES_PATH = '/v20160207/directives';
 
@@ -32,6 +33,8 @@ let downchannelClient = null;
 let downchannelStream = null;
 let reconnectTimer = null;
 let isShuttingDown = false;
+let downchannel403Count = 0;
+let downchannel403Backoff = false;
 
 function log(level, ...args) {
   const levels = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -239,9 +242,20 @@ function connectDownchannel() {
   const req = client.request(headers);
   downchannelStream = req;
   let buffer = '';
+  let lastStatus = 0;
+  let skipReconnectOnEnd = false;
   req.on('response', (headers) => {
-    const status = headers[':status'];
-    if (status !== 200) log('warn', 'Downchannel response status:', status);
+    lastStatus = headers[':status'];
+    if (lastStatus !== 200) {
+      downchannel403Count++;
+      if (lastStatus === 403 && downchannel403Count > 2) {
+        log('warn', 'Downchannel 403 - Amazon may block this. Set SKIP_DOWNCHANNEL=1 to disable. Polling still works.');
+        skipReconnectOnEnd = true;
+        scheduleReconnect(300000);
+      } else {
+        log('warn', 'Downchannel response status:', lastStatus);
+      }
+    }
   });
   req.on('data', (chunk) => {
     buffer += chunk.toString();
@@ -260,7 +274,7 @@ function connectDownchannel() {
   });
   req.on('end', () => {
     downchannelStream = null;
-    if (!isShuttingDown) scheduleReconnect();
+    if (!isShuttingDown && !skipReconnectOnEnd) scheduleReconnect();
   });
   req.on('error', (err) => {
     log('warn', 'Downchannel stream error:', err.message);
@@ -269,20 +283,24 @@ function connectDownchannel() {
   req.end();
 }
 
-function scheduleReconnect() {
+function scheduleReconnect(ms = 10000) {
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     if (isShuttingDown) return;
     log('info', 'Reconnecting downchannel...');
     connectDownchannel();
-  }, 10000);
+  }, ms);
 }
 
 async function startDownchannel() {
   const ok = await refreshCookie();
   if (!ok) {
     log('error', 'Cannot start without valid cookie. Check COOKIE_SERVER_URL.');
+    return;
+  }
+  if (SKIP_DOWNCHANNEL) {
+    log('info', 'Downchannel disabled (SKIP_DOWNCHANNEL=1). Polling only.');
     return;
   }
   connectDownchannel();

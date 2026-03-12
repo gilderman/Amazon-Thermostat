@@ -1,0 +1,28 @@
+---
+description: Amazon Thermostat project structure and conventions
+alwaysApply: true
+---
+
+# Amazon Thermostat (Hubitat + Alexa)
+
+## Project Structure
+
+- **AmazonACManager.groovy** – Hubitat app (creates child devices, cookie status, poll)
+- **AmazonACManagerHelper.groovy** – Library included by the app (Alexa API, GraphQL, cookie fetch)
+- **AmazonThermostatDriver.groovy** – Child thermostat device driver
+- **alexa-downchannel/** – Node.js server (Alexa downchannel, GraphQL proxy, pushes to Hubitat)
+- **.github/workflows/** – Docker publish to ghcr.io
+
+## Conventions
+
+- **Namespace**: `gilderman`
+- **GitHub**: Use `gilderman` for usernames, repo URLs, and package paths
+- **GHCR image**: `ghcr.io/gilderman/amazon-thermostat`
+- **Groovy**: No `private`/`static` (Hubitat compatibility). Use `logDebug()` for conditional debug; `log.info` for always-on.
+- **Env secrets**: Never commit `.env`, tokens, or cookies. Use `--env-file` or env vars at runtime.
+
+## Key Flows
+
+1. **Poll**: Hubitat → downchannel `/poll` (or direct Alexa) → thermostat state → child devices
+2. **Commands**: Child device → `sendCommandToAlexa` → downchannel `/command` (or direct Alexa)
+3. **Cookie**: From manual paste, Echo Speaks `/cookieData`, or Hubitat app `/cookie`
