@@ -32,6 +32,9 @@ let downchannelClient = null;
 let downchannelStream = null;
 let reconnectTimer = null;
 let isShuttingDown = false;
+// Thermostat endpoints cached at startup (and refreshed on discovery directives).
+// This avoids calling listEndpoints (all 439 devices) on every downchannel event.
+let cachedThermostats = null;
 
 function log(level, ...args) {
   const levels = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -112,12 +115,8 @@ async function refreshCookie() {
   }
 }
 
-async function fetchThermostatState() {
-  if (!cookieData || !bearerToken) {
-    log('warn', 'fetchThermostatState: cookie not loaded, returning empty. Check COOKIE_SERVER_URL and /ping.');
-    return [];
-  }
-  const headers = {
+function alexaHeaders() {
+  return {
     'Cookie': cookieData,
     'csrf': csrf,
     'Accept': 'application/json',
@@ -126,13 +125,23 @@ async function fetchThermostatState() {
     'Referer': 'https://alexa.amazon.com/',
     'Origin': 'https://alexa.amazon.com'
   };
-  const listBody = JSON.stringify({
+}
+
+// Discover which endpoints are thermostats and cache them.
+// Called once at startup and whenever Alexa pushes a Discovery/AddOrUpdateReport directive.
+async function refreshThermostatEndpoints() {
+  if (!cookieData || !bearerToken) {
+    log('warn', 'refreshThermostatEndpoints: cookie not loaded');
+    return;
+  }
+  const body = JSON.stringify({
     query: '{ listEndpoints(listEndpointsInput: {}) { endpoints { id friendlyName displayCategories { primary { value } } } } }'
   });
+  const headers = alexaHeaders();
   const listRes = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
     method: 'POST',
-    headers: { ...headers, 'Content-Length': Buffer.byteLength(listBody) },
-    body: listBody
+    headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
+    body
   });
   const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
   log('debug', `listEndpoints returned ${endpoints.length} endpoint(s):`,
@@ -172,11 +181,28 @@ async function fetchThermostatState() {
     });
     log('debug', `Category/name filter: ${thermostats.length} thermostat(s)`);
   }
+  cachedThermostats = thermostats;
+  log('info', `Cached ${thermostats.length} thermostat endpoint(s): ${thermostats.map(t => t.friendlyName).join(', ') || '(none)'}`);
+}
+
+// Fetch current state for the cached thermostat endpoints.
+// Does NOT call listEndpoints for discovery — that's done once at startup.
+async function fetchThermostatState() {
+  if (!cookieData || !bearerToken) {
+    log('warn', 'fetchThermostatState: cookie not loaded, returning empty. Check COOKIE_SERVER_URL and /ping.');
+    return [];
+  }
+  if (!cachedThermostats) {
+    log('info', 'Thermostat endpoints not cached yet — running discovery now');
+    await refreshThermostatEndpoints();
+  }
+  const thermostats = cachedThermostats || [];
   if (!thermostats.length) return [];
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
   const stateBody = JSON.stringify({
     query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name ... on ThermostatMode { value } ... on Setpoint { value { value scale } } ... on TemperatureSensor { value { value scale } } } } } } }`
   });
+  const headers = alexaHeaders();
   const stateRes = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
     method: 'POST',
     headers: { ...headers, 'Content-Length': Buffer.byteLength(stateBody) },
@@ -230,7 +256,18 @@ async function pushToHubitat(payload) {
   });
 }
 
-async function onDirectiveReceived() {
+async function onDirectiveReceived(directive) {
+  // If Alexa is reporting a device list change, refresh our cached endpoint IDs.
+  // State directives (mode/temp changes) only need the state query — no re-discovery.
+  const namespace = directive?.directive?.header?.namespace
+    || directive?.header?.namespace
+    || directive?.namespace
+    || '';
+  const isDiscovery = /discovery|addorupdate/i.test(namespace);
+  if (isDiscovery) {
+    log('info', `Discovery directive received (${namespace}) — refreshing thermostat endpoint cache`);
+    try { await refreshThermostatEndpoints(); } catch (e) { log('warn', 'Endpoint refresh failed:', e.message); }
+  }
   log('debug', 'Directive received, fetching thermostat state');
   try {
     const payload = await fetchThermostatState();
@@ -286,7 +323,7 @@ function connectDownchannel() {
         const obj = JSON.parse(line);
         if (obj) {
           log('debug', 'Directive:', JSON.stringify(obj).slice(0, 200));
-          onDirectiveReceived();
+          onDirectiveReceived(obj);
         }
       } catch {}
     }
@@ -318,6 +355,10 @@ async function startDownchannel() {
     log('error', 'Cannot start without valid cookie. Check COOKIE_SERVER_URL.');
     return;
   }
+  // Discover thermostats once at startup so the downchannel push path never
+  // needs to call listEndpoints(all) again — only the targeted state query runs
+  // on each directive. The cache is refreshed automatically on Discovery directives.
+  await refreshThermostatEndpoints().catch(e => log('warn', 'Initial endpoint discovery failed:', e.message));
   connectDownchannel();
 }
 
