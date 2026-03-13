@@ -390,23 +390,37 @@ function connectDownchannel() {
   const headers = {
     ':path': DIRECTIVES_PATH,
     ':method': 'GET',
-    'authorization': `Bearer ${bearerToken}`,
+    'cookie': cookieData,
+    'csrf': csrf,
     'user-agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
-    'accept': 'application/json'
+    'accept': 'application/json',
+    'referer': 'https://alexa.amazon.com/',
+    'origin': 'https://alexa.amazon.com'
   };
   const req = client.request(headers);
   downchannelStream = req;
   let buffer = '';
+  let responseStatus = null;
   req.on('response', (headers) => {
-    const status = headers[':status'];
-    if (status === 401) {
+    responseStatus = headers[':status'];
+    if (responseStatus === 401) {
       log('warn', 'Downchannel got 401 — refreshing cookie then reconnecting');
       refreshCookie().then((ok) => {
         if (ok) connectDownchannel();
         else scheduleReconnect();
       });
-    } else if (status !== 200) {
-      log('warn', 'Downchannel response status:', status);
+    } else if (responseStatus === 403) {
+      log('error', 'Downchannel got 403 — cookie may be invalid or expired. Backing off 60s then refreshing cookie.');
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (!isShuttingDown) {
+          log('info', 'Retrying downchannel after 403 backoff...');
+          refreshCookie().then(() => connectDownchannel());
+        }
+      }, 60000);
+    } else if (responseStatus !== 200) {
+      log('warn', 'Downchannel response status:', responseStatus);
     }
   });
   req.on('data', (chunk) => {
@@ -426,7 +440,8 @@ function connectDownchannel() {
   });
   req.on('end', () => {
     downchannelStream = null;
-    if (!isShuttingDown) scheduleReconnect();
+    // 401 and 403 set their own reconnect timers — don't override them here.
+    if (!isShuttingDown && responseStatus !== 401 && responseStatus !== 403) scheduleReconnect();
   });
   req.on('error', (err) => {
     log('warn', 'Downchannel stream error:', err.message);
@@ -488,17 +503,7 @@ const httpServer = http.createServer((req, res) => {
     const listBody = JSON.stringify({
       query: '{ listEndpoints(listEndpointsInput: {}) { endpoints { id friendlyName displayCategories { primary { value } } } } }'
     });
-    const headers = {
-      'Cookie': cookieData, 'csrf': csrf, 'Accept': 'application/json',
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
-      'Referer': 'https://alexa.amazon.com/', 'Origin': 'https://alexa.amazon.com'
-    };
-    fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
-      method: 'POST',
-      headers: { ...headers, 'Content-Length': Buffer.byteLength(listBody) },
-      body: listBody
-    }).then(listRes => {
+    fetchAlexaJson('https://alexa.amazon.com/nexus/v1/graphql', listBody).then(listRes => {
       const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
       const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
       res.statusCode = 200;
@@ -520,6 +525,7 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
   if (path === '/poll') {
+    log('info', 'Poll request received');
     if (!cookieData || !bearerToken) {
       res.statusCode = 503;
       res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded. Call /refresh or check COOKIE_SERVER_URL.' }));
@@ -527,6 +533,7 @@ const httpServer = http.createServer((req, res) => {
     }
     fetchThermostatState().then(async (payload) => {
       const changed = filterChanged(payload);
+      log('info', `Poll: ${payload.length} thermostat(s) fetched, ${changed.length} changed, pushing to Hubitat: ${HUBITAT_URL ? 'yes' : 'no (HUBITAT_URL not set)'}`);
       if (changed.length) {
         pushToHubitat(changed).catch(e => log('warn', 'Hubitat push failed:', e.message));
       }
