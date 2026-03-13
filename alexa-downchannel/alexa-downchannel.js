@@ -37,6 +37,25 @@ let isShuttingDown = false;
 let cachedThermostats = null;
 const COOKIE_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
 let cookieRefreshTimer = null;
+// Last-known state per endpoint ID — used to suppress no-op pushes to Hubitat.
+const lastKnownState = new Map();
+
+// Returns only thermostats whose state changed since last push, and updates the cache.
+function filterChanged(payload) {
+  const changed = [];
+  for (const t of payload) {
+    const prev = lastKnownState.get(t.endpointId);
+    if (!prev ||
+        prev.mode !== t.mode ||
+        prev.currentTemp !== t.currentTemp ||
+        prev.lowerSetpoint !== t.lowerSetpoint ||
+        prev.upperSetpoint !== t.upperSetpoint) {
+      lastKnownState.set(t.endpointId, { mode: t.mode, currentTemp: t.currentTemp, lowerSetpoint: t.lowerSetpoint, upperSetpoint: t.upperSetpoint });
+      changed.push(t);
+    }
+  }
+  return changed;
+}
 
 function log(level, ...args) {
   const levels = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -337,9 +356,12 @@ async function onDirectiveReceived(directive) {
   log('debug', 'Directive received, fetching thermostat state');
   try {
     const payload = await fetchThermostatState();
-    if (payload.length) {
-      await pushToHubitat(payload);
-      log('info', `Pushed ${payload.length} thermostat(s) to Hubitat`);
+    const changed = filterChanged(payload);
+    if (changed.length) {
+      await pushToHubitat(changed);
+      log('info', `Pushed ${changed.length} thermostat(s) to Hubitat (${payload.length - changed.length} unchanged)`);
+    } else {
+      log('debug', 'No state changes — skipping Hubitat push');
     }
   } catch (e) {
     log('warn', 'State fetch/push failed:', e.message);
@@ -504,11 +526,12 @@ const httpServer = http.createServer((req, res) => {
       return;
     }
     fetchThermostatState().then(async (payload) => {
-      if (payload.length) {
-        pushToHubitat(payload).catch(e => log('warn', 'Hubitat push failed:', e.message));
+      const changed = filterChanged(payload);
+      if (changed.length) {
+        pushToHubitat(changed).catch(e => log('warn', 'Hubitat push failed:', e.message));
       }
       res.statusCode = 200;
-      res.end(JSON.stringify({ ok: true, thermostats: payload }));
+      res.end(JSON.stringify({ ok: true, thermostats: payload, pushed: changed.length }));
     }).catch(e => {
       log('error', 'Poll failed:', e.message);
       res.statusCode = 500;
