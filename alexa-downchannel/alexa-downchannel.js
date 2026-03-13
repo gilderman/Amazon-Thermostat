@@ -24,6 +24,8 @@ const HUBITAT_URL = (process.env.HUBITAT_URL || '').replace(/\/$/, '');
 const HUBITAT_APP_ID = process.env.HUBITAT_APP_ID || '';
 const HUBITAT_ACCESS_TOKEN = process.env.HUBITAT_ACCESS_TOKEN || '';
 const THERMOSTAT_NAMES = (process.env.THERMOSTAT_NAMES || '').split(',').map(s => s.trim()).filter(Boolean);
+const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '0', 10); // 0 = disabled
+const DOWNCHANNEL_ENABLED = (process.env.DOWNCHANNEL_ENABLED || 'false').toLowerCase() === 'true';
 
 let cookieData = null;
 let csrf = '';
@@ -330,7 +332,7 @@ async function fetchThermostatState() {
   if (!stateEndpoints.length) {
     log('warn', 'State query returned 0 endpoints. Raw response:', JSON.stringify(stateRes).slice(0, 500));
   } else {
-    log('info', 'Raw state response:', JSON.stringify(stateRes?.data?.listEndpoints?.endpoints).slice(0, 2000));
+    log('debug', 'Raw state response:', JSON.stringify(stateRes?.data?.listEndpoints?.endpoints).slice(0, 2000));
   }
   const payload = [];
   for (const ep of stateEndpoints) {
@@ -364,7 +366,7 @@ async function pushToHubitat(payload) {
   const url = `${HUBITAT_URL}/apps/api/${HUBITAT_APP_ID}/statusreportfromtheapp?access_token=${HUBITAT_ACCESS_TOKEN}`;
   const body = JSON.stringify(payload);
   log('info', `Hubitat push → POST ${HUBITAT_URL}/apps/api/${HUBITAT_APP_ID}/statusreportfromtheapp`);
-  log('info', 'Hubitat push payload:', body);
+  log('debug', 'Hubitat push payload:', body);
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const lib = u.protocol === 'https:' ? https : http;
@@ -375,7 +377,7 @@ async function pushToHubitat(payload) {
       let data = '';
       res.on('data', (ch) => { data += ch; });
       res.on('end', () => {
-        log('info', `Hubitat response: HTTP ${res.statusCode} — ${data.slice(0, 500) || '(empty body)'}`);
+        log('debug', `Hubitat response: HTTP ${res.statusCode} — ${data.slice(0, 500) || '(empty body)'}`);
         resolve();
       });
     });
@@ -546,19 +548,42 @@ function scheduleReconnect() {
   }, 10000);
 }
 
+let autoPollTimer = null;
+
+function scheduleAutoPoll() {
+  if (!POLL_INTERVAL_MS || isShuttingDown) return;
+  autoPollTimer = setTimeout(async () => {
+    autoPollTimer = null;
+    try {
+      const payload = await fetchThermostatState();
+      const changed = filterChanged(payload);
+      log('info', `Auto-poll: ${payload.length} thermostat(s), ${changed.length} changed`);
+      if (changed.length) await pushToHubitat(changed).catch(e => log('warn', 'Hubitat push failed:', e.message));
+    } catch (e) {
+      log('warn', 'Auto-poll failed:', e.message);
+    }
+    scheduleAutoPoll();
+  }, POLL_INTERVAL_MS);
+}
+
 async function startDownchannel() {
   const ok = await refreshCookie();
   if (!ok) {
     log('error', 'Cannot start without valid cookie. Check COOKIE_SERVER_URL.');
     return;
   }
-  // Discover thermostats once at startup so the downchannel push path never
-  // needs to call listEndpoints(all) again — only the targeted state query runs
-  // on each directive. The cache is refreshed automatically on Discovery directives.
   await refreshThermostatEndpoints().catch(e => log('warn', 'Initial endpoint discovery failed:', e.message));
   stateQueryFragments = await buildStateQueryFragments().catch(e => { log('warn', 'Initial schema introspection failed:', e.message); return null; });
   scheduleCookieRefresh();
-  connectDownchannel();
+  if (DOWNCHANNEL_ENABLED) {
+    connectDownchannel();
+  } else {
+    log('info', 'Downchannel disabled (set DOWNCHANNEL_ENABLED=true to enable)');
+  }
+  if (POLL_INTERVAL_MS) {
+    log('info', `Auto-poll enabled every ${POLL_INTERVAL_MS / 1000}s`);
+    scheduleAutoPoll();
+  }
 }
 
 const httpServer = http.createServer((req, res) => {
@@ -648,6 +673,7 @@ httpServer.listen(PORT, () => {
 process.on('SIGINT', () => {
   isShuttingDown = true;
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (autoPollTimer) clearTimeout(autoPollTimer);
   if (cookieRefreshTimer) clearInterval(cookieRefreshTimer);
   if (downchannelClient) downchannelClient.close();
   httpServer.close();
