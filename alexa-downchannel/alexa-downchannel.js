@@ -185,7 +185,7 @@ async function fetchThermostatState() {
   }
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
   const stateBody = JSON.stringify({
-    query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name ... on ThermostatMode { value } ... on Setpoint { value { value scale } } ... on TemperatureSensor { value { value scale } } } } } } }`
+    query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name value } } } } }`
   });
   const stateRes = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
     method: 'POST',
@@ -377,9 +377,9 @@ const httpServer = http.createServer((req, res) => {
       res.statusCode = 200;
       res.end(JSON.stringify({
         ok: true,
-        thermostat_names_env: THERMOSTAT_NAMES,
+        _config: { thermostat_names_env: THERMOSTAT_NAMES },
         ...result,
-        thermostats: result.payload  // same as /poll; payload kept for consistency
+        thermostats: result.payload
       }));
     }).catch(e => {
       res.statusCode = 500;

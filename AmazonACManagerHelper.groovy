@@ -296,7 +296,7 @@ def alexaListCallback(resp, data) {
     def timeoutSec = getAlexaApiTimeout()
     logDebug "[Poll] State request -> alexa.amazon.com (timeout ${timeoutSec}s)"
     state.pollStateStart = now()
-    def stateQuery = "{\"query\":\"{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name ... on ThermostatMode { value } ... on Setpoint { value { value scale } } ... on TemperatureSensor { value { value scale } } } } } } }\"}"
+    def stateQuery = "{\"query\":\"{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name value } } } } }\"}"
     asynchttpPost('alexaStateCallback', [
         uri: 'https://alexa.amazon.com', path: '/nexus/v1/graphql',
         headers: getAlexaHeaders(), body: stateQuery, timeout: timeoutSec
