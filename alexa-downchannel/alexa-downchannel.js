@@ -11,35 +11,19 @@
 const http = require('http');
 const https = require('https');
 const http2 = require('http2');
-const fs = require('fs');
-const path = require('path');
 const { URL } = require('url');
-
-const COOKIE_FILE = (process.env.COOKIE_FILE || '').trim();
-const AMAZON_COOKIE = (process.env.AMAZON_COOKIE || '').trim();
 
 const PORT = parseInt(process.env.PORT || '3099', 10);
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 const ALEXA_REGION = (process.env.ALEXA_REGION || 'na').toLowerCase();
-const SKIP_DOWNCHANNEL = /^(1|true|yes)$/i.test(process.env.SKIP_DOWNCHANNEL || '');
 const BOB_HOST = ALEXA_REGION === 'eu' ? 'bob-dispatch-prod-eu.amazon.com' : 'bob-dispatch-prod-na.amazon.com';
 const DIRECTIVES_PATH = '/v20160207/directives';
 
-const COOKIE_SERVER_URL_RAW = (process.env.COOKIE_SERVER_URL || '').replace(/\/$/, '');
+const COOKIE_SERVER_URL = (process.env.COOKIE_SERVER_URL || '').replace(/\/$/, '');
 const HUBITAT_URL = (process.env.HUBITAT_URL || '').replace(/\/$/, '');
 const HUBITAT_APP_ID = process.env.HUBITAT_APP_ID || '';
 const HUBITAT_ACCESS_TOKEN = process.env.HUBITAT_ACCESS_TOKEN || '';
 const THERMOSTAT_NAMES = (process.env.THERMOSTAT_NAMES || '').split(',').map(s => s.trim()).filter(Boolean);
-
-/** Use COOKIE_SERVER_URL if set, else Hubitat app /cookie (same cookie list-thermostats uses). */
-function getCookieServerUrl() {
-  if (COOKIE_SERVER_URL_RAW) return COOKIE_SERVER_URL_RAW;
-  if (HUBITAT_URL && HUBITAT_APP_ID && HUBITAT_ACCESS_TOKEN) {
-    return `${HUBITAT_URL}/apps/api/${HUBITAT_APP_ID}/cookie?access_token=${HUBITAT_ACCESS_TOKEN}`;
-  }
-  return '';
-}
-const COOKIE_SERVER_URL = getCookieServerUrl();
 
 let cookieData = null;
 let csrf = '';
@@ -48,8 +32,6 @@ let downchannelClient = null;
 let downchannelStream = null;
 let reconnectTimer = null;
 let isShuttingDown = false;
-let downchannel403Count = 0;
-let downchannel403Backoff = false;
 
 function log(level, ...args) {
   const levels = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -59,21 +41,6 @@ function log(level, ...args) {
     const prefix = `[${new Date().toISOString()}] [${level.toUpperCase()}]`;
     console.log(prefix, ...args);
   }
-}
-
-function mask(s, keep = 4) {
-  if (!s || s.length <= keep) return s ? '***' : '-';
-  return s.slice(0, keep) + '...' + s.slice(-2);
-}
-
-function logEnvAndCookieStatus() {
-  log('info', 'Env: COOKIE_SERVER_URL=' + (COOKIE_SERVER_URL || '-'));
-  log('info', 'Env: HUBITAT_URL=' + (HUBITAT_URL ? mask(HUBITAT_URL, 20) : '-'));
-  log('info', 'Env: HUBITAT_APP_ID=' + (HUBITAT_APP_ID ? mask(HUBITAT_APP_ID, 4) : '-'));
-  log('info', 'Env: HUBITAT_ACCESS_TOKEN=' + (HUBITAT_ACCESS_TOKEN ? 'set' : '-'));
-  log('info', 'Env: THERMOSTAT_NAMES=' + (THERMOSTAT_NAMES.length ? THERMOSTAT_NAMES.join(',') : 'any'));
-  log('info', 'Env: ALEXA_REGION=' + ALEXA_REGION + ', SKIP_DOWNCHANNEL=' + SKIP_DOWNCHANNEL + ', LOG_LEVEL=' + LOG_LEVEL + ', PORT=' + PORT);
-  log('info', 'Cookie: cookieData=' + (cookieData ? 'present' : '-') + ', bearerToken=' + (bearerToken ? 'present' : '-') + ', csrf=' + (csrf ? 'present' : '-'));
 }
 
 function extractBearerToken(cookieStr) {
@@ -102,9 +69,6 @@ async function fetchJson(url, options = {}) {
       let data = '';
       res.on('data', (ch) => { data += ch; });
       res.on('end', () => {
-        if (res.statusCode !== 200) {
-          log('warn', `HTTP ${res.statusCode} from ${url.slice(0, 50)}... Body preview:`, String(data).slice(0, 200));
-        }
         if (res.statusCode && res.statusCode >= 400) {
           reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
           return;
@@ -123,16 +87,6 @@ async function fetchJson(url, options = {}) {
   });
 }
 
-function loadCookieFromFile(filePath) {
-  const resolved = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
-  if (!fs.existsSync(resolved)) throw new Error(`COOKIE_FILE not found: ${resolved}`);
-  const raw = fs.readFileSync(resolved, 'utf8');
-  const data = JSON.parse(raw);
-  const arr = Array.isArray(data) ? data : Object.entries(data).map(([name, value]) => ({ name, value }));
-  const cookie = arr.map(c => `${c.name}=${c.value}`).join('; ');
-  return { cookie, csrf: extractCsrf(cookie) };
-}
-
 async function fetchCookieFromCookieServer() {
   if (!COOKIE_SERVER_URL) throw new Error('Set COOKIE_SERVER_URL (Hubitat /cookie or Echo Speaks /cookieData)');
   const res = await fetchJson(COOKIE_SERVER_URL);
@@ -145,29 +99,22 @@ async function fetchCookieFromCookieServer() {
 
 async function refreshCookie() {
   try {
-    let data;
-    if (AMAZON_COOKIE) {
-      data = { cookie: AMAZON_COOKIE, csrf: extractCsrf(AMAZON_COOKIE) };
-    } else if (COOKIE_FILE) {
-      data = loadCookieFromFile(COOKIE_FILE);
-    } else {
-      data = await fetchCookieFromCookieServer();
-    }
+    const data = await fetchCookieFromCookieServer();
     cookieData = data.cookie;
     csrf = data.csrf || extractCsrf(cookieData);
     bearerToken = extractBearerToken(cookieData);
     if (!bearerToken) throw new Error('Could not extract Bearer token (at-main) from cookie');
-    log('info', 'Cookie status: OK (bearerToken present, csrf ' + (csrf ? 'present' : 'empty') + ')');
+    log('info', 'Cookie refreshed successfully');
     return true;
   } catch (e) {
-    log('error', 'Cookie status: FAIL -', e.message);
+    log('error', 'Cookie refresh failed:', e.message);
     return false;
   }
 }
 
 async function fetchThermostatState() {
   if (!cookieData || !bearerToken) {
-    log('warn', 'No cookie/bearerToken. Check COOKIE_FILE, AMAZON_COOKIE, or COOKIE_SERVER_URL.');
+    log('warn', 'fetchThermostatState: cookie not loaded, returning empty. Check COOKIE_SERVER_URL and /ping.');
     return [];
   }
   const headers = {
@@ -188,36 +135,31 @@ async function fetchThermostatState() {
     body: listBody
   });
   const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
-  if (LOG_LEVEL === 'debug' && endpoints.length) {
-    log('debug', 'First endpoint shape:', JSON.stringify(endpoints[0]).slice(0, 400));
-  }
-  if (!endpoints.length) {
-    const errs = listRes?.errors || listRes?.data?.listEndpoints?.errors;
-    log('warn', 'Alexa listEndpoints empty. Response:', JSON.stringify(listRes).slice(0, 300) + (JSON.stringify(listRes).length > 300 ? '...' : ''));
-  }
-  function getDisplayCategory(ep) {
-    const dc = ep.displayCategories;
-    if (!dc) return '';
-    const primary = dc.primary || (Array.isArray(dc) && dc[0]);
-    const val = primary?.value ?? (Array.isArray(dc) ? dc[0] : null);
-    return (typeof val === 'string' ? val : (val?.value ?? '')).toUpperCase();
-  }
+  log('debug', `listEndpoints returned ${endpoints.length} endpoint(s):`,
+    endpoints.map(ep => `"${ep.friendlyName}" [${ep.displayCategories?.primary?.value || 'NO_CAT'}]`).join(', ') || '(none)');
   const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
-  let thermostats = endpoints.filter(ep => {
-    const cat = getDisplayCategory(ep);
-    const name = (ep.friendlyName || '').toLowerCase();
-    return thermoCategories.includes(cat) || name.includes('thermostat');
-  });
+  let thermostats;
   if (THERMOSTAT_NAMES.length) {
+    // When names are explicitly configured, match by name across ALL endpoints —
+    // don't require a THERMOSTAT category (Alexa sometimes reports these as INTERIOR_BLIND etc.)
     const targetNames = THERMOSTAT_NAMES.map(n => n.toLowerCase());
-    thermostats = thermostats.filter(t => targetNames.includes((t.friendlyName || '').toLowerCase()));
+    thermostats = endpoints.filter(ep => targetNames.includes((ep.friendlyName || '').toLowerCase()));
+    log('debug', `THERMOSTAT_NAMES filter on all endpoints: found ${thermostats.length} of ${targetNames.length} configured names`);
+    if (!thermostats.length) {
+      log('warn', `No endpoints matched THERMOSTAT_NAMES=[${THERMOSTAT_NAMES.join(', ')}]. Falling back to category filter.`);
+      thermostats = endpoints.filter(ep =>
+        thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()));
+      log('warn', `Fallback category filter: ${thermostats.length} thermostat(s)`);
+    }
+  } else {
+    thermostats = endpoints.filter(ep => {
+      const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
+      const name = (ep.friendlyName || '').toLowerCase();
+      return thermoCategories.includes(cat) || name.includes('thermostat');
+    });
+    log('debug', `Category/name filter: ${thermostats.length} thermostat(s)`);
   }
-  if (!thermostats.length) thermostats = endpoints.filter(ep => thermoCategories.includes(getDisplayCategory(ep)));
-  if (!thermostats.length) {
-    const names = endpoints.slice(0, 5).map(e => `${(e.friendlyName || '?')} [${getDisplayCategory(e) || '?'}]`).join(', ');
-    log('warn', `No thermostats found. Endpoints: ${endpoints.length}. Sample: ${names}. THERMOSTAT_NAMES=${THERMOSTAT_NAMES.join(',') || 'any'}`);
-    return [];
-  }
+  if (!thermostats.length) return [];
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
   const stateBody = JSON.stringify({
     query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name ... on ThermostatMode { value } ... on Setpoint { value { value scale } } ... on TemperatureSensor { value { value scale } } } } } } }`
@@ -317,20 +259,9 @@ function connectDownchannel() {
   const req = client.request(headers);
   downchannelStream = req;
   let buffer = '';
-  let lastStatus = 0;
-  let skipReconnectOnEnd = false;
   req.on('response', (headers) => {
-    lastStatus = headers[':status'];
-    if (lastStatus !== 200) {
-      downchannel403Count++;
-      if (lastStatus === 403 && downchannel403Count > 2) {
-        log('warn', 'Downchannel 403 - Amazon may block this. Set SKIP_DOWNCHANNEL=1 to disable. Polling still works.');
-        skipReconnectOnEnd = true;
-        scheduleReconnect(300000);
-      } else {
-        log('warn', 'Downchannel response status:', lastStatus);
-      }
-    }
+    const status = headers[':status'];
+    if (status !== 200) log('warn', 'Downchannel response status:', status);
   });
   req.on('data', (chunk) => {
     buffer += chunk.toString();
@@ -349,7 +280,7 @@ function connectDownchannel() {
   });
   req.on('end', () => {
     downchannelStream = null;
-    if (!isShuttingDown && !skipReconnectOnEnd) scheduleReconnect();
+    if (!isShuttingDown) scheduleReconnect();
   });
   req.on('error', (err) => {
     log('warn', 'Downchannel stream error:', err.message);
@@ -358,24 +289,20 @@ function connectDownchannel() {
   req.end();
 }
 
-function scheduleReconnect(ms = 10000) {
+function scheduleReconnect() {
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     if (isShuttingDown) return;
     log('info', 'Reconnecting downchannel...');
     connectDownchannel();
-  }, ms);
+  }, 10000);
 }
 
 async function startDownchannel() {
   const ok = await refreshCookie();
   if (!ok) {
     log('error', 'Cannot start without valid cookie. Check COOKIE_SERVER_URL.');
-    return;
-  }
-  if (SKIP_DOWNCHANNEL) {
-    log('info', 'Downchannel disabled (SKIP_DOWNCHANNEL=1). Polling only.');
     return;
   }
   connectDownchannel();
@@ -390,31 +317,7 @@ const httpServer = http.createServer((req, res) => {
     res.end(JSON.stringify({
       status: 'ok',
       downchannel: !!downchannelStream,
-      cookie: !!cookieData,
-      bearerToken: !!bearerToken
-    }));
-    return;
-  }
-  if (path === '/status') {
-    res.statusCode = 200;
-    res.end(JSON.stringify({
-      env: {
-        COOKIE_SERVER_URL: COOKIE_SERVER_URL ? 'set' : 'not set',
-        HUBITAT_URL: HUBITAT_URL ? 'set' : 'not set',
-        HUBITAT_APP_ID: HUBITAT_APP_ID ? 'set' : 'not set',
-        HUBITAT_ACCESS_TOKEN: HUBITAT_ACCESS_TOKEN ? 'set' : 'not set',
-        THERMOSTAT_NAMES: THERMOSTAT_NAMES.length ? THERMOSTAT_NAMES : '(any)',
-        ALEXA_REGION: ALEXA_REGION,
-        SKIP_DOWNCHANNEL: !!SKIP_DOWNCHANNEL,
-        LOG_LEVEL: LOG_LEVEL,
-        PORT: PORT
-      },
-      cookie: {
-        present: !!cookieData,
-        bearerToken: !!bearerToken,
-        csrf: !!csrf
-      },
-      downchannel: !!downchannelStream
+      cookie: !!cookieData
     }));
     return;
   }
@@ -425,20 +328,55 @@ const httpServer = http.createServer((req, res) => {
     });
     return;
   }
-  if (path === '/poll') {
-    log('info', 'Poll requested');
+  if (path === '/debug') {
     if (!cookieData || !bearerToken) {
       res.statusCode = 503;
-      res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded. Call /refresh or check COOKIE_FILE, AMAZON_COOKIE, or COOKIE_SERVER_URL.' }));
+      res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded.' }));
+      return;
+    }
+    const listBody = JSON.stringify({
+      query: '{ listEndpoints(listEndpointsInput: {}) { endpoints { id friendlyName displayCategories { primary { value } } } } }'
+    });
+    const headers = {
+      'Cookie': cookieData, 'csrf': csrf, 'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
+      'Referer': 'https://alexa.amazon.com/', 'Origin': 'https://alexa.amazon.com'
+    };
+    fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Length': Buffer.byteLength(listBody) },
+      body: listBody
+    }).then(listRes => {
+      const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
+      const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
+      res.statusCode = 200;
+      res.end(JSON.stringify({
+        ok: true,
+        thermostat_names_env: THERMOSTAT_NAMES,
+        total_endpoints: endpoints.length,
+        endpoints: endpoints.map(ep => ({
+          friendlyName: ep.friendlyName,
+          category: ep.displayCategories?.primary?.value || null,
+          matchesCategoryFilter: thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()),
+          matchesNameFilter: (ep.friendlyName || '').toLowerCase().includes('thermostat')
+        }))
+      }));
+    }).catch(e => {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    });
+    return;
+  }
+  if (path === '/poll') {
+    if (!cookieData || !bearerToken) {
+      res.statusCode = 503;
+      res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded. Call /refresh or check COOKIE_SERVER_URL.' }));
       return;
     }
     fetchThermostatState().then(async (payload) => {
-      if (!cookieData || !bearerToken) log('warn', 'Poll: No cookie (COOKIE_SERVER_URL unreachable or empty?)');
       if (payload.length) {
         pushToHubitat(payload).catch(e => log('warn', 'Hubitat push failed:', e.message));
-        log('info', `Poll: ${payload.length} thermostat(s)`);
-      } else {
-        log('warn', 'Poll: No thermostats (cookie missing, or none match THERMOSTAT_NAMES?)');
       }
       res.statusCode = 200;
       res.end(JSON.stringify({ ok: true, thermostats: payload }));
@@ -453,30 +391,9 @@ const httpServer = http.createServer((req, res) => {
   res.end(JSON.stringify({ error: 'Not found' }));
 });
 
-function maskSecret(s, show = 4) {
-  if (!s || s.length <= show) return s ? '***' : '(not set)';
-  return s.slice(0, Math.min(show, 2)) + '***' + s.slice(-2);
-}
-
-function logStartupConfig() {
-  log('info', '--- Config from env ---');
-  const cookieSrc = COOKIE_SERVER_URL_RAW ? 'explicit' : (COOKIE_SERVER_URL ? 'Hubitat app /cookie' : 'not set');
-  log('info', `  COOKIE_SERVER_URL: ${COOKIE_SERVER_URL ? maskSecret(COOKIE_SERVER_URL, 40) + ' (' + cookieSrc + ')' : '(not set)'}`);
-  log('info', `  HUBITAT_URL: ${HUBITAT_URL ? maskSecret(HUBITAT_URL, 30) : '(not set)'}`);
-  log('info', `  HUBITAT_APP_ID: ${HUBITAT_APP_ID ? maskSecret(HUBITAT_APP_ID, 8) : '(not set)'}`);
-  log('info', `  HUBITAT_ACCESS_TOKEN: ${HUBITAT_ACCESS_TOKEN ? '***set***' : '(not set)'}`);
-  log('info', `  THERMOSTAT_NAMES: ${THERMOSTAT_NAMES.length ? THERMOSTAT_NAMES.join(', ') : '(any)'}`);
-  log('info', `  ALEXA_REGION: ${ALEXA_REGION}`);
-  log('info', `  SKIP_DOWNCHANNEL: ${SKIP_DOWNCHANNEL}`);
-  log('info', `  LOG_LEVEL: ${LOG_LEVEL}`);
-  log('info', `  PORT: ${PORT}`);
-  log('info', '------------------------');
-}
-
 httpServer.listen(PORT, () => {
   log('info', `Alexa Downchannel Server listening on port ${PORT}`);
   log('info', `Ping: http://localhost:${PORT}/ping`);
-  logStartupConfig();
   if (!COOKIE_SERVER_URL) log('warn', 'COOKIE_SERVER_URL not set - cookie fetch will fail');
   if (!HUBITAT_URL || !HUBITAT_APP_ID || !HUBITAT_ACCESS_TOKEN) log('warn', 'HUBITAT_* not set - callback push will fail');
   startDownchannel();
