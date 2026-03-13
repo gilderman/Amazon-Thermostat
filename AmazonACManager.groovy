@@ -271,6 +271,14 @@ def logAllStates(device) {
     log.debug "=============================="
 }
 
+def parseSetpoint(entry, preferredValue, targetIndex) {
+    if (preferredValue != null) return preferredValue
+    def nums = entry.target?.findAll(/[\d.]+/)
+    if (!nums || nums.isEmpty()) return null
+    def idx = (targetIndex < nums.size()) ? targetIndex : 0
+    return nums[idx] as Double
+}
+
 def updateThermostats(List<Map> dataList) {
     dataList.each { entry ->
         def name = (entry.name ?: '').trim()
@@ -293,43 +301,29 @@ def updateThermostats(List<Map> dataList) {
 
         switch (mode) {
             case "heat":
-                def targetVal = entry.target?.replaceAll(/[^\d.]/, '') as Double
-                if (targetVal != null) {
-                    child.sendEvent(name: "heatingSetpoint", value: targetVal)
-                }
+                def heatVal = parseSetpoint(entry, entry.lowerSetpoint, 0)
+                if (heatVal != null) child.sendEvent(name: "heatingSetpoint", value: heatVal)
                 break
             case "cool":
-                def targetVal = entry.target?.replaceAll(/[^\d.]/, '') as Double
-                if (targetVal != null) {
-                    child.sendEvent(name: "coolingSetpoint", value: targetVal)
-                }
+                def coolVal = parseSetpoint(entry, entry.upperSetpoint, 1)
+                if (coolVal != null) child.sendEvent(name: "coolingSetpoint", value: coolVal)
                 break
             case "auto":
-                def low = entry.lowerSetpoint
-                def high = entry.upperSetpoint
+                def low = parseSetpoint(entry, entry.lowerSetpoint, 0)
+                def high = parseSetpoint(entry, entry.upperSetpoint, 1)
                 if (low != null && high != null) {
                     child.sendEvent(name: "heatingSetpoint", value: low)
                     child.sendEvent(name: "coolingSetpoint", value: high)
-                } else {
-                    def range = entry.target?.findAll(/[\d.]+/)
-                    if (range?.size() >= 2) {
-                        low = range[0] as Double
-                        high = range[1] as Double
-                        child.sendEvent(name: "heatingSetpoint", value: low)
-                        child.sendEvent(name: "coolingSetpoint", value: high)
-                    } else {
-                        log.warn "Could not parse auto mode range for '$name': ${entry.target}"
-                    }
+                } else if (entry.target) {
+                    log.warn "Could not parse auto mode range for '$name': ${entry.target}"
                 }
                 break
             case "off":
-                // no setpoints updated
                 break
             default:
                 log.warn "Unknown mode: $mode"
         }
         
-        //logAllStates(child)
         child.updateOperatingState()
     }
 }
