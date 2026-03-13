@@ -31,5 +31,8 @@ build/
 PS/
 push-and-wait.ps1
 
+# Local reference script (not committed)
+scripts/list-thermostats.js
+
 # Cursor (optional: remove if you want to commit rules)
 # .cursor/

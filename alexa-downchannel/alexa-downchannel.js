@@ -150,6 +150,109 @@ async function refreshCookie() {
   }
 }
 
+const ALEXA_GRAPHQL = 'https://alexa.amazon.com/nexus/v1/graphql';
+
+function getAlexaHeaders() {
+  return {
+    'Cookie': cookieData,
+    'csrf': csrf,
+    'Accept': 'application/json',
+    'Content-Type': 'application/json',
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
+    'Referer': 'https://alexa.amazon.com/',
+    'Origin': 'https://alexa.amazon.com'
+  };
+}
+
+/** Introspect GraphQL types (list-thermostats approach). Returns { typeName: typeInfo, ... }. */
+async function introspectTypes(typeNames) {
+  const headers = getAlexaHeaders();
+  const fragments = typeNames.map(
+    (t, i) => `t${i}: __type(name: "${t}") { kind fields { name type { name kind ofType { name kind } } } enumValues { name } possibleTypes { name kind } }`
+  ).join('\n  ');
+  const query = `{ ${fragments} }`;
+  const body = JSON.stringify({ query });
+  const res = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
+    method: 'POST',
+    headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
+    body
+  });
+  const result = {};
+  typeNames.forEach((t, i) => { result[t] = res?.data?.[`t${i}`]; });
+  return result;
+}
+
+/** Build thermostat state query from schema (list-thermostats approach). Returns { queryTemplate, fullQueryExample }. */
+async function buildThermostatStateQueryFromIntrospection() {
+  const concreteTypeNames = [
+    'ThermostatMode', 'Setpoint', 'TemperatureSensor',
+    'HvacAuxiliaryHeaterStage', 'HvacCoolerStage', 'HvacFanStage', 'HvacPrimaryHeaterStage',
+  ];
+  const schema = await introspectTypes(['FeatureProperty', ...concreteTypeNames]);
+
+  const BASE_SKIP = new Set(['error']);
+  const baseFields = (schema.FeatureProperty?.fields || [])
+    .filter(f => !BASE_SKIP.has(f.name) && (f.type?.kind === 'SCALAR' || f.type?.kind === 'ENUM'))
+    .map(f => f.name)
+    .join('\n            ') || 'name type';
+
+  const INTERFACE_FIELDS = new Set(['name', 'error', 'accuracy', 'type']);
+  const nestedTypeNames = new Set();
+  for (const typeName of concreteTypeNames) {
+    const typeInfo = schema[typeName];
+    if (!typeInfo?.fields) continue;
+    for (const f of typeInfo.fields) {
+      if (!INTERFACE_FIELDS.has(f.name) && f.type?.kind === 'OBJECT' && f.type?.name) {
+        nestedTypeNames.add(f.type.name);
+      }
+    }
+  }
+
+  const nestedSchema = nestedTypeNames.size > 0 ? await introspectTypes([...nestedTypeNames]) : {};
+
+  const fragments = [];
+  for (const typeName of concreteTypeNames) {
+    const typeInfo = schema[typeName];
+    if (!typeInfo?.fields) continue;
+    const extraFields = typeInfo.fields.filter(f => !INTERFACE_FIELDS.has(f.name));
+    if (extraFields.length === 0) continue;
+
+    const fieldSelections = extraFields.map(f => {
+      const kind = f.type?.kind;
+      const ofKind = f.type?.ofType?.kind;
+      if (kind === 'SCALAR' || kind === 'ENUM' || ofKind === 'SCALAR' || ofKind === 'ENUM') {
+        return f.name;
+      }
+      if (kind === 'OBJECT' && f.type?.name) {
+        const nestedFields = (nestedSchema[f.type.name]?.fields || []).map(nf => nf.name);
+        if (nestedFields.length > 0) return `${f.name} { ${nestedFields.join(' ')} }`;
+      }
+      return `${f.name} { value }`;
+    });
+
+    fragments.push(`... on ${typeName} {\n              ${fieldSelections.join('\n              ')}\n            }`);
+  }
+
+  const propertiesSelection = [baseFields, ...fragments].join('\n            ');
+  const fullQueryExample = `{
+  listEndpoints(listEndpointsInput: { endpointIds: ["ID1", "ID2"] }) {
+    endpoints {
+      id
+      features {
+        name
+        properties {
+            ${propertiesSelection}
+        }
+      }
+    }
+  }
+}`;
+  return { baseFields, fragments, propertiesSelection, fullQueryExample };
+}
+
+/** Cached properties selection from introspection (list-thermostats approach). Built once on first state fetch. */
+let cachedPropertiesSelection = null;
+
 /**
  * Fetches thermostat state. Returns { payload, total_endpoints, thermostats_filtered, state_endpoints_count, graphql_errors }.
  * Uses the same flow for /poll and /debug so both return consistent results.
@@ -184,9 +287,19 @@ async function fetchThermostatState() {
     return { ...empty, total_endpoints: endpoints.length, thermostats_filtered: 0 };
   }
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
-  const stateBody = JSON.stringify({
-    query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name value } } } } }`
-  });
+  if (!cachedPropertiesSelection) {
+    try {
+      const built = await buildThermostatStateQueryFromIntrospection();
+      cachedPropertiesSelection = built.propertiesSelection;
+      log('info', 'Introspected thermostat schema; cached properties selection');
+    } catch (e) {
+      log('warn', 'Introspection failed, falling back to properties { name value }:', e.message);
+      cachedPropertiesSelection = 'name\n            value';
+    }
+  }
+  const propsSel = cachedPropertiesSelection || 'name\n            value';
+  const stateQuery = `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties {\n            ${propsSel}\n          } } } } }`;
+  const stateBody = JSON.stringify({ query: stateQuery });
   const stateRes = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
     method: 'POST',
     headers: { ...headers, 'Content-Length': Buffer.byteLength(stateBody) },
@@ -364,6 +477,27 @@ const httpServer = http.createServer((req, res) => {
     refreshCookie().then((ok) => {
       res.statusCode = ok ? 200 : 500;
       res.end(JSON.stringify({ ok }));
+    });
+    return;
+  }
+  if (path === '/introspect') {
+    if (!cookieData || !bearerToken) {
+      res.statusCode = 503;
+      res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded. Call /refresh or check COOKIE_SERVER_URL.' }));
+      return;
+    }
+    buildThermostatStateQueryFromIntrospection().then((result) => {
+      res.statusCode = 200;
+      res.end(JSON.stringify({
+        ok: true,
+        fullQueryExample: result.fullQueryExample,
+        propertiesSelection: result.propertiesSelection,
+        baseFields: result.baseFields,
+        fragments: result.fragments
+      }, null, 2));
+    }).catch(e => {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ ok: false, error: e.message }));
     });
     return;
   }
