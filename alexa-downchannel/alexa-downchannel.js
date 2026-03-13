@@ -69,9 +69,14 @@ async function fetchJson(url, options = {}) {
       let data = '';
       res.on('data', (ch) => { data += ch; });
       res.on('end', () => {
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
+          return;
+        }
         try {
           resolve(JSON.parse(data || '{}'));
         } catch {
+          log('warn', 'fetchJson: non-JSON response:', data.slice(0, 200));
           resolve({});
         }
       });
@@ -108,7 +113,10 @@ async function refreshCookie() {
 }
 
 async function fetchThermostatState() {
-  if (!cookieData || !bearerToken) return [];
+  if (!cookieData || !bearerToken) {
+    log('warn', 'fetchThermostatState: cookie not loaded, returning empty. Check COOKIE_SERVER_URL and /ping.');
+    return [];
+  }
   const headers = {
     'Cookie': cookieData,
     'csrf': csrf,
@@ -309,6 +317,11 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
   if (path === '/poll') {
+    if (!cookieData || !bearerToken) {
+      res.statusCode = 503;
+      res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded. Call /refresh or check COOKIE_SERVER_URL.' }));
+      return;
+    }
     fetchThermostatState().then(async (payload) => {
       if (payload.length) {
         pushToHubitat(payload).catch(e => log('warn', 'Hubitat push failed:', e.message));
