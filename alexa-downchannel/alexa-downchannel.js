@@ -342,7 +342,7 @@ async function fetchThermostatState() {
         const val = v && typeof v === 'object' && 'value' in v ? v.value : v;
         const scale = v && typeof v === 'object' ? v.scale : null;
         const numVal = typeof val === 'number' ? val : (val != null ? parseFloat(String(val).replace(/[^\d.]/g, '')) : null);
-        const display = val != null ? (scale ? `${val}° ${(scale || '').slice(0, 1)}` : `${val}`) : null;
+        const display = val != null ? (scale ? `${val} ${(scale || '').slice(0, 1)}` : `${val}`) : null;
         switch (prop.name) {
           case 'thermostatMode': state.mode = (prop.thermostatModeValue || val || 'OFF').toString().toLowerCase(); break;
           case 'temperature': state.currentTemp = display; break;
@@ -352,7 +352,7 @@ async function fetchThermostatState() {
         }
       }
     }
-    if (state.lowerSetpoint != null && state.upperSetpoint != null) state.target = `${state.lowerSetpoint}°–${state.upperSetpoint}°`;
+    if (state.lowerSetpoint != null && state.upperSetpoint != null) state.target = `${state.lowerSetpoint}-${state.upperSetpoint}`;
     const t = thermostats.find(x => x.id === ep.id);
     if (t) payload.push({ name: t.friendlyName, endpointId: ep.id, ...state });
   }
