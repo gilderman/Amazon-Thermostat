@@ -194,6 +194,10 @@ async function refreshThermostatEndpoints() {
   });
   const listRes = await fetchAlexaJson('https://alexa.amazon.com/nexus/v1/graphql', body);
   const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
+  if (!endpoints.length) {
+    log('warn', 'listEndpoints returned 0 endpoints — cookie may be expired. Keeping existing cache:', cachedThermostats?.map(t => t.friendlyName).join(', ') || '(none)');
+    return;
+  }
   log('debug', `listEndpoints returned ${endpoints.length} endpoint(s):`,
     endpoints.map(ep => `"${ep.friendlyName}" [${ep.displayCategories?.primary?.value || 'NO_CAT'}]`).join(', ') || '(none)');
   const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
@@ -242,7 +246,7 @@ async function fetchThermostatState() {
     log('warn', 'fetchThermostatState: cookie not loaded, returning empty. Check COOKIE_SERVER_URL and /ping.');
     return [];
   }
-  if (!cachedThermostats) {
+  if (!cachedThermostats || !cachedThermostats.length) {
     log('info', 'Thermostat endpoints not cached yet — running discovery now');
     await refreshThermostatEndpoints();
   }
