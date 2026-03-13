@@ -142,8 +142,21 @@ async function fetchThermostatState() {
   if (THERMOSTAT_NAMES.length) {
     // When names are explicitly configured, match by name across ALL endpoints —
     // don't require a THERMOSTAT category (Alexa sometimes reports these as INTERIOR_BLIND etc.)
-    const targetNames = THERMOSTAT_NAMES.map(n => n.toLowerCase());
-    thermostats = endpoints.filter(ep => targetNames.includes((ep.friendlyName || '').toLowerCase()));
+    // Trim names to handle trailing spaces in Alexa's friendly names.
+    // When multiple endpoints share the same name, prefer THERMOSTAT/TEMPERATURE_SENSOR category.
+    const targetNames = THERMOSTAT_NAMES.map(n => n.trim().toLowerCase());
+    const matched = endpoints.filter(ep => targetNames.includes((ep.friendlyName || '').trim().toLowerCase()));
+    const deduped = new Map();
+    for (const ep of matched) {
+      const key = (ep.friendlyName || '').trim().toLowerCase();
+      const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
+      const existing = deduped.get(key);
+      const existingCat = existing ? (existing.displayCategories?.primary?.value || '').toUpperCase() : '';
+      if (!existing || (thermoCategories.includes(cat) && !thermoCategories.includes(existingCat))) {
+        deduped.set(key, ep);
+      }
+    }
+    thermostats = [...deduped.values()];
     log('debug', `THERMOSTAT_NAMES filter on all endpoints: found ${thermostats.length} of ${targetNames.length} configured names`);
     if (!thermostats.length) {
       log('warn', `No endpoints matched THERMOSTAT_NAMES=[${THERMOSTAT_NAMES.join(', ')}]. Falling back to category filter.`);
