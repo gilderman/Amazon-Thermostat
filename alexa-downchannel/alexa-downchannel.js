@@ -37,7 +37,7 @@ let isShuttingDown = false;
 let cachedThermostats = null;
 const COOKIE_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
 let cookieRefreshTimer = null;
-// Last-known state per endpoint ID ΓÇö used to suppress no-op pushes to Hubitat.
+// Last-known state per endpoint ID — used to suppress no-op pushes to Hubitat.
 const lastKnownState = new Map();
 
 // Returns only thermostats whose state changed since last push, and updates the cache.
@@ -148,7 +148,7 @@ async function fetchAlexaJson(url, body) {
     return await fetchJson(url, makeOpts());
   } catch (e) {
     if (e.status === 401) {
-      log('info', 'Alexa API returned 401 ΓÇö refreshing cookie and retrying');
+      log('info', 'Alexa API returned 401 — refreshing cookie and retrying');
       const ok = await refreshCookie();
       if (!ok) throw new Error('Cookie refresh failed after 401');
       return await fetchJson(url, makeOpts());
@@ -164,7 +164,7 @@ function scheduleCookieRefresh() {
     const ok = await refreshCookie();
     // If cookie changed, reconnect downchannel so it uses the new bearer token.
     if (ok && downchannelStream) {
-      log('info', 'Cookie refreshed ΓÇö reconnecting downchannel with new token');
+      log('info', 'Cookie refreshed — reconnecting downchannel with new token');
       connectDownchannel();
     }
   }, COOKIE_REFRESH_INTERVAL_MS);
@@ -236,14 +236,14 @@ async function refreshThermostatEndpoints() {
 }
 
 // Fetch current state for the cached thermostat endpoints.
-// Does NOT call listEndpoints for discovery ΓÇö that's done once at startup.
+// Does NOT call listEndpoints for discovery — that's done once at startup.
 async function fetchThermostatState() {
   if (!cookieData || !bearerToken) {
     log('warn', 'fetchThermostatState: cookie not loaded, returning empty. Check COOKIE_SERVER_URL and /ping.');
     return [];
   }
   if (!cachedThermostats) {
-    log('info', 'Thermostat endpoints not cached yet ΓÇö running discovery now');
+    log('info', 'Thermostat endpoints not cached yet — running discovery now');
     await refreshThermostatEndpoints();
   }
   const thermostats = cachedThermostats || [];
@@ -332,7 +332,7 @@ function isThermostatDirective(directive) {
     directive?.endpoint?.endpointId || '';
   if (endpointId && cachedThermostats?.some(t => t.id === endpointId)) return true;
 
-  // No namespace at all ΓÇö process to be safe (e.g. keepalive ping objects)
+  // No namespace at all — process to be safe (e.g. keepalive ping objects)
   if (!ns) return true;
 
   log('debug', `Skipping non-thermostat directive: ${ns}`);
@@ -343,14 +343,14 @@ async function onDirectiveReceived(directive) {
   if (!isThermostatDirective(directive)) return;
 
   // If Alexa is reporting a device list change, refresh our cached endpoint IDs.
-  // State directives (mode/temp changes) only need the state query ΓÇö no re-discovery.
+  // State directives (mode/temp changes) only need the state query — no re-discovery.
   const namespace = directive?.directive?.header?.namespace
     || directive?.header?.namespace
     || directive?.namespace
     || '';
   const isDiscovery = /discovery|addorupdate/i.test(namespace);
   if (isDiscovery) {
-    log('info', `Discovery directive received (${namespace}) ΓÇö refreshing thermostat endpoint cache`);
+    log('info', `Discovery directive received (${namespace}) — refreshing thermostat endpoint cache`);
     try { await refreshThermostatEndpoints(); } catch (e) { log('warn', 'Endpoint refresh failed:', e.message); }
   }
   log('debug', 'Directive received, fetching thermostat state');
@@ -361,7 +361,7 @@ async function onDirectiveReceived(directive) {
       await pushToHubitat(changed);
       log('info', `Pushed ${changed.length} thermostat(s) to Hubitat (${payload.length - changed.length} unchanged)`);
     } else {
-      log('debug', 'No state changes ΓÇö skipping Hubitat push');
+      log('debug', 'No state changes — skipping Hubitat push');
     }
   } catch (e) {
     log('warn', 'State fetch/push failed:', e.message);
@@ -400,7 +400,7 @@ function connectDownchannel() {
   req.on('response', (headers) => {
     const status = headers[':status'];
     if (status === 401) {
-      log('warn', 'Downchannel got 401 ΓÇö refreshing cookie then reconnecting');
+      log('warn', 'Downchannel got 401 — refreshing cookie then reconnecting');
       refreshCookie().then((ok) => {
         if (ok) connectDownchannel();
         else scheduleReconnect();
@@ -452,7 +452,7 @@ async function startDownchannel() {
     return;
   }
   // Discover thermostats once at startup so the downchannel push path never
-  // needs to call listEndpoints(all) again ΓÇö only the targeted state query runs
+  // needs to call listEndpoints(all) again — only the targeted state query runs
   // on each directive. The cache is refreshed automatically on Discovery directives.
   await refreshThermostatEndpoints().catch(e => log('warn', 'Initial endpoint discovery failed:', e.message));
   scheduleCookieRefresh();
