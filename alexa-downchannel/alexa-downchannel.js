@@ -360,6 +360,8 @@ async function pushToHubitat(payload) {
   if (!HUBITAT_URL || !HUBITAT_APP_ID || !HUBITAT_ACCESS_TOKEN || !payload.length) return;
   const url = `${HUBITAT_URL}/apps/api/${HUBITAT_APP_ID}/statusreportfromtheapp?access_token=${HUBITAT_ACCESS_TOKEN}`;
   const body = JSON.stringify(payload);
+  log('info', `Hubitat push → POST ${HUBITAT_URL}/apps/api/${HUBITAT_APP_ID}/statusreportfromtheapp`);
+  log('info', 'Hubitat push payload:', body);
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const lib = u.protocol === 'https:' ? https : http;
@@ -369,7 +371,10 @@ async function pushToHubitat(payload) {
     }, (res) => {
       let data = '';
       res.on('data', (ch) => { data += ch; });
-      res.on('end', () => resolve());
+      res.on('end', () => {
+        log('info', `Hubitat response: HTTP ${res.statusCode} — ${data.slice(0, 500) || '(empty body)'}`);
+        resolve();
+      });
     });
     req.on('error', (e) => { log('error', 'Hubitat callback failed:', e.message); reject(e); });
     req.write(body);
