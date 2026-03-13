@@ -32,6 +32,7 @@ let downchannelClient = null;
 let downchannelStream = null;
 let reconnectTimer = null;
 let isShuttingDown = false;
+let inBackoff = false; // true while a 403/401 backoff timer is active
 // Thermostat endpoints cached at startup (and refreshed on discovery directives).
 // This avoids calling listEndpoints (all 439 devices) on every downchannel event.
 let cachedThermostats = null;
@@ -254,10 +255,13 @@ async function fetchThermostatState() {
   if (!thermostats.length) return [];
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
   const stateBody = JSON.stringify({
-    query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name ... on ThermostatMode { value } ... on Setpoint { value { value scale } } ... on TemperatureSensor { value { value scale } } } } } } }`
+    query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name value accuracy } } } } }`
   });
   const stateRes = await fetchAlexaJson('https://alexa.amazon.com/nexus/v1/graphql', stateBody);
   const stateEndpoints = stateRes?.data?.listEndpoints?.endpoints || [];
+  if (!stateEndpoints.length) {
+    log('warn', 'State query returned 0 endpoints. Raw response:', JSON.stringify(stateRes).slice(0, 500));
+  }
   const payload = [];
   for (const ep of stateEndpoints) {
     const state = { mode: 'off', currentTemp: null, target: null, lowerSetpoint: null, upperSetpoint: null };
@@ -389,7 +393,7 @@ function connectDownchannel() {
   client.on('close', () => {
     downchannelClient = null;
     downchannelStream = null;
-    if (!isShuttingDown) scheduleReconnect();
+    if (!isShuttingDown && !inBackoff) scheduleReconnect();
   });
   const headers = {
     ':path': DIRECTIVES_PATH,
@@ -415,9 +419,11 @@ function connectDownchannel() {
       });
     } else if (responseStatus === 403) {
       log('error', 'Downchannel got 403 — cookie may be invalid or expired. Backing off 60s then refreshing cookie.');
+      inBackoff = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
+        inBackoff = false;
         if (!isShuttingDown) {
           log('info', 'Retrying downchannel after 403 backoff...');
           refreshCookie().then(() => connectDownchannel());
