@@ -390,9 +390,12 @@ function connectDownchannel() {
   const headers = {
     ':path': DIRECTIVES_PATH,
     ':method': 'GET',
-    'authorization': `Bearer ${bearerToken}`,
+    'cookie': cookieData,
+    'csrf': csrf,
     'user-agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
-    'accept': 'application/json'
+    'accept': 'application/json',
+    'referer': 'https://alexa.amazon.com/',
+    'origin': 'https://alexa.amazon.com'
   };
   const req = client.request(headers);
   downchannelStream = req;
@@ -405,6 +408,17 @@ function connectDownchannel() {
         if (ok) connectDownchannel();
         else scheduleReconnect();
       });
+    } else if (status === 403) {
+      log('error', 'Downchannel got 403 — cookie may be invalid or expired. Call /refresh. Not retrying immediately.');
+      // 403 is not transient — back off 60s to avoid hammering Amazon
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (!isShuttingDown) {
+          log('info', 'Retrying downchannel after 403 backoff...');
+          refreshCookie().then(() => connectDownchannel());
+        }
+      }, 60000);
     } else if (status !== 200) {
       log('warn', 'Downchannel response status:', status);
     }
@@ -488,17 +502,7 @@ const httpServer = http.createServer((req, res) => {
     const listBody = JSON.stringify({
       query: '{ listEndpoints(listEndpointsInput: {}) { endpoints { id friendlyName displayCategories { primary { value } } } } }'
     });
-    const headers = {
-      'Cookie': cookieData, 'csrf': csrf, 'Accept': 'application/json',
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
-      'Referer': 'https://alexa.amazon.com/', 'Origin': 'https://alexa.amazon.com'
-    };
-    fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
-      method: 'POST',
-      headers: { ...headers, 'Content-Length': Buffer.byteLength(listBody) },
-      body: listBody
-    }).then(listRes => {
+    fetchAlexaJson('https://alexa.amazon.com/nexus/v1/graphql', listBody).then(listRes => {
       const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
       const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
       res.statusCode = 200;
