@@ -16,6 +16,7 @@ const { URL } = require('url');
 const PORT = parseInt(process.env.PORT || '3099', 10);
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 const ALEXA_REGION = (process.env.ALEXA_REGION || 'na').toLowerCase();
+const SKIP_DOWNCHANNEL = /^(1|true|yes)$/i.test(process.env.SKIP_DOWNCHANNEL || '');
 const BOB_HOST = ALEXA_REGION === 'eu' ? 'bob-dispatch-prod-eu.amazon.com' : 'bob-dispatch-prod-na.amazon.com';
 const DIRECTIVES_PATH = '/v20160207/directives';
 
@@ -24,6 +25,43 @@ const HUBITAT_URL = (process.env.HUBITAT_URL || '').replace(/\/$/, '');
 const HUBITAT_APP_ID = process.env.HUBITAT_APP_ID || '';
 const HUBITAT_ACCESS_TOKEN = process.env.HUBITAT_ACCESS_TOKEN || '';
 const THERMOSTAT_NAMES = (process.env.THERMOSTAT_NAMES || '').split(',').map(s => s.trim()).filter(Boolean);
+
+const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
+
+/** Given raw endpoints from listEndpoints, return thermostats matching THERMOSTAT_NAMES or category filter. */
+function filterThermostatsFromEndpoints(endpoints) {
+  let thermostats;
+  if (THERMOSTAT_NAMES.length) {
+    const targetNames = THERMOSTAT_NAMES.map(n => n.trim().toLowerCase());
+    const matched = endpoints.filter(ep => targetNames.includes((ep.friendlyName || '').trim().toLowerCase()));
+    const deduped = new Map();
+    for (const ep of matched) {
+      const key = (ep.friendlyName || '').trim().toLowerCase();
+      const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
+      const existing = deduped.get(key);
+      const existingCat = existing ? (existing.displayCategories?.primary?.value || '').toUpperCase() : '';
+      if (!existing || (thermoCategories.includes(cat) && !thermoCategories.includes(existingCat))) {
+        deduped.set(key, ep);
+      }
+    }
+    thermostats = [...deduped.values()];
+    log('debug', `THERMOSTAT_NAMES filter on all endpoints: found ${thermostats.length} of ${targetNames.length} configured names`);
+    if (!thermostats.length) {
+      log('warn', `No endpoints matched THERMOSTAT_NAMES=[${THERMOSTAT_NAMES.join(', ')}]. Falling back to category filter.`);
+      thermostats = endpoints.filter(ep =>
+        thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()));
+      log('warn', `Fallback category filter: ${thermostats.length} thermostat(s)`);
+    }
+  } else {
+    thermostats = endpoints.filter(ep => {
+      const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
+      const name = (ep.friendlyName || '').toLowerCase();
+      return thermoCategories.includes(cat) || name.includes('thermostat');
+    });
+    log('debug', `Category/name filter: ${thermostats.length} thermostat(s)`);
+  }
+  return thermostats;
+}
 
 let cookieData = null;
 let csrf = '';
@@ -112,10 +150,15 @@ async function refreshCookie() {
   }
 }
 
+/**
+ * Fetches thermostat state. Returns { payload, total_endpoints, thermostats_filtered, state_endpoints_count, graphql_errors }.
+ * Uses the same flow for /poll and /debug so both return consistent results.
+ */
 async function fetchThermostatState() {
+  const empty = { payload: [], total_endpoints: 0, thermostats_filtered: 0, state_endpoints_count: 0, graphql_errors: null };
   if (!cookieData || !bearerToken) {
     log('warn', 'fetchThermostatState: cookie not loaded, returning empty. Check COOKIE_SERVER_URL and /ping.');
-    return [];
+    return empty;
   }
   const headers = {
     'Cookie': cookieData,
@@ -135,44 +178,11 @@ async function fetchThermostatState() {
     body: listBody
   });
   const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
-  log('debug', `listEndpoints returned ${endpoints.length} endpoint(s):`,
-    endpoints.map(ep => `"${ep.friendlyName}" [${ep.displayCategories?.primary?.value || 'NO_CAT'}]`).join(', ') || '(none)');
-  const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
-  let thermostats;
-  if (THERMOSTAT_NAMES.length) {
-    // When names are explicitly configured, match by name across ALL endpoints —
-    // don't require a THERMOSTAT category (Alexa sometimes reports these as INTERIOR_BLIND etc.)
-    // Trim names to handle trailing spaces in Alexa's friendly names.
-    // When multiple endpoints share the same name, prefer THERMOSTAT/TEMPERATURE_SENSOR category.
-    const targetNames = THERMOSTAT_NAMES.map(n => n.trim().toLowerCase());
-    const matched = endpoints.filter(ep => targetNames.includes((ep.friendlyName || '').trim().toLowerCase()));
-    const deduped = new Map();
-    for (const ep of matched) {
-      const key = (ep.friendlyName || '').trim().toLowerCase();
-      const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
-      const existing = deduped.get(key);
-      const existingCat = existing ? (existing.displayCategories?.primary?.value || '').toUpperCase() : '';
-      if (!existing || (thermoCategories.includes(cat) && !thermoCategories.includes(existingCat))) {
-        deduped.set(key, ep);
-      }
-    }
-    thermostats = [...deduped.values()];
-    log('debug', `THERMOSTAT_NAMES filter on all endpoints: found ${thermostats.length} of ${targetNames.length} configured names`);
-    if (!thermostats.length) {
-      log('warn', `No endpoints matched THERMOSTAT_NAMES=[${THERMOSTAT_NAMES.join(', ')}]. Falling back to category filter.`);
-      thermostats = endpoints.filter(ep =>
-        thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()));
-      log('warn', `Fallback category filter: ${thermostats.length} thermostat(s)`);
-    }
-  } else {
-    thermostats = endpoints.filter(ep => {
-      const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
-      const name = (ep.friendlyName || '').toLowerCase();
-      return thermoCategories.includes(cat) || name.includes('thermostat');
-    });
-    log('debug', `Category/name filter: ${thermostats.length} thermostat(s)`);
+  log('debug', `listEndpoints returned ${endpoints.length} endpoint(s) -> ${THERMOSTAT_NAMES.length ? `${THERMOSTAT_NAMES.join(', ')}` : 'category filter'}`);
+  const thermostats = filterThermostatsFromEndpoints(endpoints);
+  if (!thermostats.length) {
+    return { ...empty, total_endpoints: endpoints.length, thermostats_filtered: 0 };
   }
-  if (!thermostats.length) return [];
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
   const stateBody = JSON.stringify({
     query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name ... on ThermostatMode { value } ... on Setpoint { value { value scale } } ... on TemperatureSensor { value { value scale } } } } } } }`
@@ -183,6 +193,11 @@ async function fetchThermostatState() {
     body: stateBody
   });
   const stateEndpoints = stateRes?.data?.listEndpoints?.endpoints || [];
+  const gqlErrors = stateRes?.errors;
+  if (gqlErrors?.length) log('warn', 'GraphQL state query errors:', JSON.stringify(gqlErrors).slice(0, 300));
+  if (!stateEndpoints.length && thermostats.length) {
+    log('warn', `State query returned 0 endpoints for ${thermostats.length} thermostat(s). IDs: ${thermostats.map(t => t.id).slice(0, 3).join(', ')}...`);
+  }
   const payload = [];
   for (const ep of stateEndpoints) {
     const state = { mode: 'off', currentTemp: null, target: null, lowerSetpoint: null, upperSetpoint: null };
@@ -206,7 +221,13 @@ async function fetchThermostatState() {
     const t = thermostats.find(x => x.id === ep.id);
     if (t) payload.push({ name: t.friendlyName, endpointId: ep.id, ...state });
   }
-  return payload;
+  return {
+    payload,
+    total_endpoints: endpoints.length,
+    thermostats_filtered: thermostats.length,
+    state_endpoints_count: stateEndpoints.length,
+    graphql_errors: gqlErrors || null
+  };
 }
 
 async function pushToHubitat(payload) {
@@ -233,7 +254,7 @@ async function pushToHubitat(payload) {
 async function onDirectiveReceived() {
   log('debug', 'Directive received, fetching thermostat state');
   try {
-    const payload = await fetchThermostatState();
+    const { payload } = await fetchThermostatState();
     if (payload.length) {
       await pushToHubitat(payload);
       log('info', `Pushed ${payload.length} thermostat(s) to Hubitat`);
@@ -244,7 +265,7 @@ async function onDirectiveReceived() {
 }
 
 function connectDownchannel() {
-  if (isShuttingDown || !bearerToken) return;
+  if (isShuttingDown || SKIP_DOWNCHANNEL || !bearerToken) return;
   if (downchannelClient) {
     try { downchannelClient.close(); } catch {}
     downchannelClient = null;
@@ -303,10 +324,11 @@ function connectDownchannel() {
 }
 
 function scheduleReconnect() {
+  if (SKIP_DOWNCHANNEL) return;
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    if (isShuttingDown) return;
+    if (isShuttingDown || SKIP_DOWNCHANNEL) return;
     log('info', 'Reconnecting downchannel...');
     connectDownchannel();
   }, 10000);
@@ -316,6 +338,10 @@ async function startDownchannel() {
   const ok = await refreshCookie();
   if (!ok) {
     log('error', 'Cannot start without valid cookie. Check COOKIE_SERVER_URL.');
+    return;
+  }
+  if (SKIP_DOWNCHANNEL) {
+    log('info', 'Downchannel disabled (SKIP_DOWNCHANNEL=1). Polling only.');
     return;
   }
   connectDownchannel();
@@ -347,33 +373,13 @@ const httpServer = http.createServer((req, res) => {
       res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded.' }));
       return;
     }
-    const listBody = JSON.stringify({
-      query: '{ listEndpoints(listEndpointsInput: {}) { endpoints { id friendlyName displayCategories { primary { value } } } } }'
-    });
-    const headers = {
-      'Cookie': cookieData, 'csrf': csrf, 'Accept': 'application/json',
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
-      'Referer': 'https://alexa.amazon.com/', 'Origin': 'https://alexa.amazon.com'
-    };
-    fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
-      method: 'POST',
-      headers: { ...headers, 'Content-Length': Buffer.byteLength(listBody) },
-      body: listBody
-    }).then(listRes => {
-      const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
-      const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
+    fetchThermostatState().then((result) => {
       res.statusCode = 200;
       res.end(JSON.stringify({
         ok: true,
         thermostat_names_env: THERMOSTAT_NAMES,
-        total_endpoints: endpoints.length,
-        endpoints: endpoints.map(ep => ({
-          friendlyName: ep.friendlyName,
-          category: ep.displayCategories?.primary?.value || null,
-          matchesCategoryFilter: thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()),
-          matchesNameFilter: (ep.friendlyName || '').toLowerCase().includes('thermostat')
-        }))
+        ...result,
+        thermostats: result.payload  // same as /poll; payload kept for consistency
       }));
     }).catch(e => {
       res.statusCode = 500;
@@ -387,7 +393,7 @@ const httpServer = http.createServer((req, res) => {
       res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded. Call /refresh or check COOKIE_SERVER_URL.' }));
       return;
     }
-    fetchThermostatState().then(async (payload) => {
+    fetchThermostatState().then(async ({ payload }) => {
       if (payload.length) {
         pushToHubitat(payload).catch(e => log('warn', 'Hubitat push failed:', e.message));
       }
@@ -407,6 +413,7 @@ const httpServer = http.createServer((req, res) => {
 httpServer.listen(PORT, () => {
   log('info', `Alexa Downchannel Server listening on port ${PORT}`);
   log('info', `Ping: http://localhost:${PORT}/ping`);
+  if (SKIP_DOWNCHANNEL) log('info', 'Downchannel disabled (SKIP_DOWNCHANNEL=1). Polling only.');
   if (!COOKIE_SERVER_URL) log('warn', 'COOKIE_SERVER_URL not set - cookie fetch will fail');
   if (!HUBITAT_URL || !HUBITAT_APP_ID || !HUBITAT_ACCESS_TOKEN) log('warn', 'HUBITAT_* not set - callback push will fail');
   startDownchannel();
