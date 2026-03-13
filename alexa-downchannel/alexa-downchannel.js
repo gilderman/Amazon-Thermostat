@@ -102,6 +102,9 @@ async function fetchJson(url, options = {}) {
       let data = '';
       res.on('data', (ch) => { data += ch; });
       res.on('end', () => {
+        if (res.statusCode !== 200) {
+          log('warn', `HTTP ${res.statusCode} from ${url.slice(0, 50)}... Body preview:`, String(data).slice(0, 200));
+        }
         if (res.statusCode && res.statusCode >= 400) {
           reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
           return;
@@ -185,13 +188,23 @@ async function fetchThermostatState() {
     body: listBody
   });
   const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
+  if (LOG_LEVEL === 'debug' && endpoints.length) {
+    log('debug', 'First endpoint shape:', JSON.stringify(endpoints[0]).slice(0, 400));
+  }
   if (!endpoints.length) {
     const errs = listRes?.errors || listRes?.data?.listEndpoints?.errors;
     log('warn', 'Alexa listEndpoints empty. Response:', JSON.stringify(listRes).slice(0, 300) + (JSON.stringify(listRes).length > 300 ? '...' : ''));
   }
+  function getDisplayCategory(ep) {
+    const dc = ep.displayCategories;
+    if (!dc) return '';
+    const primary = dc.primary || (Array.isArray(dc) && dc[0]);
+    const val = primary?.value ?? (Array.isArray(dc) ? dc[0] : null);
+    return (typeof val === 'string' ? val : (val?.value ?? '')).toUpperCase();
+  }
   const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
   let thermostats = endpoints.filter(ep => {
-    const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
+    const cat = getDisplayCategory(ep);
     const name = (ep.friendlyName || '').toLowerCase();
     return thermoCategories.includes(cat) || name.includes('thermostat');
   });
@@ -199,11 +212,10 @@ async function fetchThermostatState() {
     const targetNames = THERMOSTAT_NAMES.map(n => n.toLowerCase());
     thermostats = thermostats.filter(t => targetNames.includes((t.friendlyName || '').toLowerCase()));
   }
-  if (!thermostats.length) thermostats = endpoints.filter(ep =>
-    thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()));
+  if (!thermostats.length) thermostats = endpoints.filter(ep => thermoCategories.includes(getDisplayCategory(ep)));
   if (!thermostats.length) {
-    const names = endpoints.map(e => `${(e.friendlyName || '?')} [${(e.displayCategories?.primary?.value || '?')}]`).join(', ');
-    log('warn', `No thermostats found. Endpoints: ${endpoints.length}. Names: ${names || 'none'}. THERMOSTAT_NAMES=${THERMOSTAT_NAMES.join(',') || 'any'}`);
+    const names = endpoints.slice(0, 5).map(e => `${(e.friendlyName || '?')} [${getDisplayCategory(e) || '?'}]`).join(', ');
+    log('warn', `No thermostats found. Endpoints: ${endpoints.length}. Sample: ${names}. THERMOSTAT_NAMES=${THERMOSTAT_NAMES.join(',') || 'any'}`);
     return [];
   }
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
