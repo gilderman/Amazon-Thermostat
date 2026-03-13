@@ -138,23 +138,26 @@ async function fetchThermostatState() {
   log('debug', `listEndpoints returned ${endpoints.length} endpoint(s):`,
     endpoints.map(ep => `"${ep.friendlyName}" [${ep.displayCategories?.primary?.value || 'NO_CAT'}]`).join(', ') || '(none)');
   const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
-  let thermostats = endpoints.filter(ep => {
-    const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
-    const name = (ep.friendlyName || '').toLowerCase();
-    return thermoCategories.includes(cat) || name.includes('thermostat');
-  });
-  log('debug', `After category/name filter: ${thermostats.length} thermostat(s)`);
+  let thermostats;
   if (THERMOSTAT_NAMES.length) {
+    // When names are explicitly configured, match by name across ALL endpoints —
+    // don't require a THERMOSTAT category (Alexa sometimes reports these as INTERIOR_BLIND etc.)
     const targetNames = THERMOSTAT_NAMES.map(n => n.toLowerCase());
-    log('debug', `THERMOSTAT_NAMES filter: looking for [${targetNames.join(', ')}]`);
-    thermostats = thermostats.filter(t => targetNames.includes((t.friendlyName || '').toLowerCase()));
-    log('debug', `After THERMOSTAT_NAMES filter: ${thermostats.length} thermostat(s)`);
-  }
-  if (!thermostats.length) {
-    log('warn', `No thermostats matched. endpoints=${endpoints.length}, THERMOSTAT_NAMES=[${THERMOSTAT_NAMES.join(', ')}]. Falling back to category-only filter.`);
-    thermostats = endpoints.filter(ep =>
-      thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()));
-    log('warn', `Fallback category filter: ${thermostats.length} thermostat(s)`);
+    thermostats = endpoints.filter(ep => targetNames.includes((ep.friendlyName || '').toLowerCase()));
+    log('debug', `THERMOSTAT_NAMES filter on all endpoints: found ${thermostats.length} of ${targetNames.length} configured names`);
+    if (!thermostats.length) {
+      log('warn', `No endpoints matched THERMOSTAT_NAMES=[${THERMOSTAT_NAMES.join(', ')}]. Falling back to category filter.`);
+      thermostats = endpoints.filter(ep =>
+        thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()));
+      log('warn', `Fallback category filter: ${thermostats.length} thermostat(s)`);
+    }
+  } else {
+    thermostats = endpoints.filter(ep => {
+      const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
+      const name = (ep.friendlyName || '').toLowerCase();
+      return thermoCategories.includes(cat) || name.includes('thermostat');
+    });
+    log('debug', `Category/name filter: ${thermostats.length} thermostat(s)`);
   }
   if (!thermostats.length) return [];
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
