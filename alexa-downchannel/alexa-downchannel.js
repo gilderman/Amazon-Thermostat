@@ -102,9 +102,14 @@ async function fetchJson(url, options = {}) {
       let data = '';
       res.on('data', (ch) => { data += ch; });
       res.on('end', () => {
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
+          return;
+        }
         try {
           resolve(JSON.parse(data || '{}'));
         } catch {
+          log('warn', 'fetchJson: non-JSON response:', data.slice(0, 200));
           resolve({});
         }
       });
@@ -159,7 +164,7 @@ async function refreshCookie() {
 
 async function fetchThermostatState() {
   if (!cookieData || !bearerToken) {
-    log('warn', 'No cookie/bearerToken - COOKIE_SERVER_URL unreachable or cookie fetch failed');
+    log('warn', 'No cookie/bearerToken. Check COOKIE_FILE, AMAZON_COOKIE, or COOKIE_SERVER_URL.');
     return [];
   }
   const headers = {
@@ -410,6 +415,11 @@ const httpServer = http.createServer((req, res) => {
   }
   if (path === '/poll') {
     log('info', 'Poll requested');
+    if (!cookieData || !bearerToken) {
+      res.statusCode = 503;
+      res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded. Call /refresh or check COOKIE_FILE, AMAZON_COOKIE, or COOKIE_SERVER_URL.' }));
+      return;
+    }
     fetchThermostatState().then(async (payload) => {
       if (!cookieData || !bearerToken) log('warn', 'Poll: No cookie (COOKIE_SERVER_URL unreachable or empty?)');
       if (payload.length) {
