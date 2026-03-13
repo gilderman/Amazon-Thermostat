@@ -11,7 +11,12 @@
 const http = require('http');
 const https = require('https');
 const http2 = require('http2');
+const fs = require('fs');
+const path = require('path');
 const { URL } = require('url');
+
+const COOKIE_FILE = (process.env.COOKIE_FILE || '').trim();
+const AMAZON_COOKIE = (process.env.AMAZON_COOKIE || '').trim();
 
 const PORT = parseInt(process.env.PORT || '3099', 10);
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
@@ -110,6 +115,16 @@ async function fetchJson(url, options = {}) {
   });
 }
 
+function loadCookieFromFile(filePath) {
+  const resolved = path.isAbsolute(filePath) ? filePath : path.join(process.cwd(), filePath);
+  if (!fs.existsSync(resolved)) throw new Error(`COOKIE_FILE not found: ${resolved}`);
+  const raw = fs.readFileSync(resolved, 'utf8');
+  const data = JSON.parse(raw);
+  const arr = Array.isArray(data) ? data : Object.entries(data).map(([name, value]) => ({ name, value }));
+  const cookie = arr.map(c => `${c.name}=${c.value}`).join('; ');
+  return { cookie, csrf: extractCsrf(cookie) };
+}
+
 async function fetchCookieFromCookieServer() {
   if (!COOKIE_SERVER_URL) throw new Error('Set COOKIE_SERVER_URL (Hubitat /cookie or Echo Speaks /cookieData)');
   const res = await fetchJson(COOKIE_SERVER_URL);
@@ -122,7 +137,14 @@ async function fetchCookieFromCookieServer() {
 
 async function refreshCookie() {
   try {
-    const data = await fetchCookieFromCookieServer();
+    let data;
+    if (AMAZON_COOKIE) {
+      data = { cookie: AMAZON_COOKIE, csrf: extractCsrf(AMAZON_COOKIE) };
+    } else if (COOKIE_FILE) {
+      data = loadCookieFromFile(COOKIE_FILE);
+    } else {
+      data = await fetchCookieFromCookieServer();
+    }
     cookieData = data.cookie;
     csrf = data.csrf || extractCsrf(cookieData);
     bearerToken = extractBearerToken(cookieData);
