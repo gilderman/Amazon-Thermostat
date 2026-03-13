@@ -35,6 +35,8 @@ let isShuttingDown = false;
 // Thermostat endpoints cached at startup (and refreshed on discovery directives).
 // This avoids calling listEndpoints (all 439 devices) on every downchannel event.
 let cachedThermostats = null;
+const COOKIE_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
+let cookieRefreshTimer = null;
 
 function log(level, ...args) {
   const levels = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -73,7 +75,9 @@ async function fetchJson(url, options = {}) {
       res.on('data', (ch) => { data += ch; });
       res.on('end', () => {
         if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
+          const err = new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`);
+          err.status = res.statusCode;
+          reject(err);
           return;
         }
         try {
@@ -115,6 +119,38 @@ async function refreshCookie() {
   }
 }
 
+// Wraps fetchJson for Alexa API calls: rebuilds auth headers and retries once on 401.
+async function fetchAlexaJson(url, body) {
+  const makeOpts = () => {
+    const hdrs = alexaHeaders();
+    return { method: 'POST', headers: { ...hdrs, 'Content-Length': Buffer.byteLength(body) }, body };
+  };
+  try {
+    return await fetchJson(url, makeOpts());
+  } catch (e) {
+    if (e.status === 401) {
+      log('info', 'Alexa API returned 401 — refreshing cookie and retrying');
+      const ok = await refreshCookie();
+      if (!ok) throw new Error('Cookie refresh failed after 401');
+      return await fetchJson(url, makeOpts());
+    }
+    throw e;
+  }
+}
+
+function scheduleCookieRefresh() {
+  if (cookieRefreshTimer) clearInterval(cookieRefreshTimer);
+  cookieRefreshTimer = setInterval(async () => {
+    log('info', 'Periodic cookie refresh');
+    const ok = await refreshCookie();
+    // If cookie changed, reconnect downchannel so it uses the new bearer token.
+    if (ok && downchannelStream) {
+      log('info', 'Cookie refreshed — reconnecting downchannel with new token');
+      connectDownchannel();
+    }
+  }, COOKIE_REFRESH_INTERVAL_MS);
+}
+
 function alexaHeaders() {
   return {
     'Cookie': cookieData,
@@ -137,12 +173,7 @@ async function refreshThermostatEndpoints() {
   const body = JSON.stringify({
     query: '{ listEndpoints(listEndpointsInput: {}) { endpoints { id friendlyName displayCategories { primary { value } } } } }'
   });
-  const headers = alexaHeaders();
-  const listRes = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
-    method: 'POST',
-    headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
-    body
-  });
+  const listRes = await fetchAlexaJson('https://alexa.amazon.com/nexus/v1/graphql', body);
   const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
   log('debug', `listEndpoints returned ${endpoints.length} endpoint(s):`,
     endpoints.map(ep => `"${ep.friendlyName}" [${ep.displayCategories?.primary?.value || 'NO_CAT'}]`).join(', ') || '(none)');
@@ -202,12 +233,7 @@ async function fetchThermostatState() {
   const stateBody = JSON.stringify({
     query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name ... on ThermostatMode { value } ... on Setpoint { value { value scale } } ... on TemperatureSensor { value { value scale } } } } } } }`
   });
-  const headers = alexaHeaders();
-  const stateRes = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
-    method: 'POST',
-    headers: { ...headers, 'Content-Length': Buffer.byteLength(stateBody) },
-    body: stateBody
-  });
+  const stateRes = await fetchAlexaJson('https://alexa.amazon.com/nexus/v1/graphql', stateBody);
   const stateEndpoints = stateRes?.data?.listEndpoints?.endpoints || [];
   const payload = [];
   for (const ep of stateEndpoints) {
@@ -256,7 +282,47 @@ async function pushToHubitat(payload) {
   });
 }
 
+// Namespaces (lowercased prefix match) that indicate thermostat state may have changed.
+// Anything else (audio, notifications, speech, etc.) is ignored.
+const THERMOSTAT_NAMESPACES = [
+  'alexa.thermostatcontroller',
+  'alexa.temperaturesensor',
+  'alexa.endpointhealth',
+  'alexa.connectedhome.control',
+  'alexa.connectedhome.query',
+  'alexa.connectedhome.discovery',
+  'alexa.discovery',
+];
+
+function isThermostatDirective(directive) {
+  const ns = (
+    directive?.directive?.header?.namespace ||
+    directive?.header?.namespace ||
+    directive?.namespace || ''
+  ).toLowerCase();
+
+  // Always handle discovery/device-list changes
+  if (/discovery|addorupdate/i.test(ns)) return true;
+
+  // Namespace whitelist
+  if (THERMOSTAT_NAMESPACES.some(n => ns.startsWith(n))) return true;
+
+  // If we have cached endpoints, check whether this directive targets one of them
+  const endpointId =
+    directive?.directive?.endpoint?.endpointId ||
+    directive?.endpoint?.endpointId || '';
+  if (endpointId && cachedThermostats?.some(t => t.id === endpointId)) return true;
+
+  // No namespace at all — process to be safe (e.g. keepalive ping objects)
+  if (!ns) return true;
+
+  log('debug', `Skipping non-thermostat directive: ${ns}`);
+  return false;
+}
+
 async function onDirectiveReceived(directive) {
+  if (!isThermostatDirective(directive)) return;
+
   // If Alexa is reporting a device list change, refresh our cached endpoint IDs.
   // State directives (mode/temp changes) only need the state query — no re-discovery.
   const namespace = directive?.directive?.header?.namespace
@@ -311,7 +377,15 @@ function connectDownchannel() {
   let buffer = '';
   req.on('response', (headers) => {
     const status = headers[':status'];
-    if (status !== 200) log('warn', 'Downchannel response status:', status);
+    if (status === 401) {
+      log('warn', 'Downchannel got 401 — refreshing cookie then reconnecting');
+      refreshCookie().then((ok) => {
+        if (ok) connectDownchannel();
+        else scheduleReconnect();
+      });
+    } else if (status !== 200) {
+      log('warn', 'Downchannel response status:', status);
+    }
   });
   req.on('data', (chunk) => {
     buffer += chunk.toString();
@@ -359,6 +433,7 @@ async function startDownchannel() {
   // needs to call listEndpoints(all) again — only the targeted state query runs
   // on each directive. The cache is refreshed automatically on Discovery directives.
   await refreshThermostatEndpoints().catch(e => log('warn', 'Initial endpoint discovery failed:', e.message));
+  scheduleCookieRefresh();
   connectDownchannel();
 }
 
@@ -456,6 +531,7 @@ httpServer.listen(PORT, () => {
 process.on('SIGINT', () => {
   isShuttingDown = true;
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (cookieRefreshTimer) clearInterval(cookieRefreshTimer);
   if (downchannelClient) downchannelClient.close();
   httpServer.close();
   process.exit(0);
