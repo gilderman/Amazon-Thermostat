@@ -1,13 +1,13 @@
 ---
-description: Alexa downchannel Node.js server patterns
+description: Alexa Thermostat Server (Node.js) patterns
 globs: "alexa-downchannel/**"
 alwaysApply: false
 ---
 
 # alexa-downchannel (Node.js)
 
-- Uses `https`/`http2` stdlib only — no external deps
-- Cookie from env `COOKIE_SERVER_URL`; refresh before downchannel connect
+- Uses `http`/`https` stdlib only — no external deps
+- Cookie from env `COOKIE_SERVER_URL`; refresh at startup
 - GraphQL at `https://alexa.amazon.com/nexus/v1/graphql`; headers: Cookie, csrf, Accept, Content-Type, User-Agent, Referer, Origin
-- Endpoints: `/ping`, `/health`, `/refresh`, `/poll`, `/command`, `/cookieData`
+- Endpoints: `/ping`, `/health`, `/refresh`, `/poll`
 - Push to Hubitat: POST `{HUBITAT_URL}/apps/api/{APP_ID}/statusreportfromtheapp?access_token=...`

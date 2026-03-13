@@ -10,7 +10,7 @@ alwaysApply: true
 - **AmazonACManager.groovy** – Hubitat app (creates child devices, cookie status, poll)
 - **AmazonACManagerHelper.groovy** – Library included by the app (Alexa API, GraphQL, cookie fetch)
 - **AmazonThermostatDriver.groovy** – Child thermostat device driver
-- **alexa-downchannel/** – Node.js server (Alexa downchannel, GraphQL proxy, pushes to Hubitat)
+- **alexa-downchannel/** – Node.js thermostat server (GraphQL poll proxy, pushes to Hubitat)
 - **.github/workflows/** – Docker publish to ghcr.io
 
 ## Conventions
@@ -20,6 +20,14 @@ alwaysApply: true
 - **GHCR image**: `ghcr.io/gilderman/amazon-thermostat`
 - **Groovy**: No `private`/`static` (Hubitat compatibility). Use `logDebug()` for conditional debug; `log.info` for always-on.
 - **Env secrets**: Never commit `.env`, tokens, or cookies. Use `--env-file` or env vars at runtime.
+
+## Build Verification (required)
+
+When committing or pushing changes that touch **alexa-downchannel/**:
+
+1. **Before commit**: Run `docker build ./alexa-downchannel` to verify the image builds. Fix any errors before committing.
+2. **After push**: Wait for the GitHub workflow. Use `.\push-and-wait.ps1 -Message "msg"` (commits, pushes, blocks until build completes), or `gh run watch --workflow=docker-publish.yml --exit-status` after manual push.
+3. Do **not** report "done" until the Docker build has completed.
 
 ## Key Flows
 

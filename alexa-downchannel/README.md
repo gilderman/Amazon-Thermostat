@@ -2,6 +2,8 @@
 
 Polls Alexa's GraphQL API for thermostat state and pushes updates to Hubitat. Used as a proxy when Hubitat cannot reach Alexa directly (TLS issues).
 
+**Docker image:** `ghcr.io/gilderman/amazon-thermostat:latest` — built automatically on push to `main`. Pull with `docker pull ghcr.io/gilderman/amazon-thermostat:latest` (login to `ghcr.io` first with a GitHub PAT that has `read:packages`).
+
 ## How to Run
 
 ### With Node.js
@@ -13,24 +15,56 @@ node alexa-downchannel.js
 
 ### With Docker
 
-**Option A: Pull from GHCR**
+**Image:** `ghcr.io/gilderman/amazon-thermostat:latest` (built on push to main)
+
+**Option A: Pull from GHCR** (Linux/Mac)
 
 ```bash
-echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
+# Login (one time; use a GitHub PAT with read:packages)
+echo $GITHUB_TOKEN | docker login ghcr.io -u gilderman --password-stdin
+
 docker pull ghcr.io/gilderman/amazon-thermostat:latest
 docker run -d --name alexa-thermostat \
-  -e COOKIE_SERVER_URL="..." \
-  -e HUBITAT_URL="..." \
-  -e HUBITAT_APP_ID="..." \
-  -e HUBITAT_ACCESS_TOKEN="..." \
+  -e COOKIE_SERVER_URL="http://YOUR_ECHO_SPEAKS:8091/cookieData" \
+  -e HUBITAT_URL="http://YOUR_HUBITAT_IP:8080" \
+  -e HUBITAT_APP_ID="YOUR_APP_ID" \
+  -e HUBITAT_ACCESS_TOKEN="YOUR_TOKEN" \
+  -e THERMOSTAT_NAMES="Office, Living Room" \
   -p 3099:3099 \
+  --restart unless-stopped \
   ghcr.io/gilderman/amazon-thermostat:latest
 ```
 
-**Option B: Build locally**
+**Option B: Windows (PowerShell)**
+
+```powershell
+# 1. Login to GHCR (one time; set $env:GITHUB_TOKEN to your PAT first)
+$env:GITHUB_TOKEN | docker login ghcr.io -u gilderman --password-stdin
+
+# 2. Pull and run
+docker pull ghcr.io/gilderman/amazon-thermostat:latest
+docker run -d --name alexa-thermostat `
+  -e COOKIE_SERVER_URL="http://YOUR_ECHO_SPEAKS:8091/cookieData" `
+  -e HUBITAT_URL="http://YOUR_HUBITAT_IP:8080" `
+  -e HUBITAT_APP_ID="YOUR_APP_ID" `
+  -e HUBITAT_ACCESS_TOKEN="YOUR_TOKEN" `
+  -e THERMOSTAT_NAMES="Office" `
+  -p 3099:3099 `
+  --restart unless-stopped `
+  ghcr.io/gilderman/amazon-thermostat:latest
+```
+
+**Option C: With .env file**
 
 ```bash
-docker build -t alexa-thermostat ./alexa-downchannel
+# Create .env (copy from .env.example in this directory, fill in values)
+docker run -d --name alexa-thermostat --env-file .env -p 3099:3099 --restart unless-stopped ghcr.io/gilderman/amazon-thermostat:latest
+```
+
+**Option D: Build from source**
+
+```bash
+docker build -t alexa-thermostat .
 docker run -d --name alexa-thermostat \
   -e COOKIE_SERVER_URL="..." \
   -e HUBITAT_URL="..." \
@@ -40,17 +74,7 @@ docker run -d --name alexa-thermostat \
   alexa-thermostat
 ```
 
-**Option C: Windows with .env**
-
-```powershell
-# 1. Login to GHCR (one time)
-$env:GITHUB_TOKEN | docker login ghcr.io -u gilderman --password-stdin
-
-# 2. Create .env (copy from .env.example, fill in values)
-# 3. Run
-cd PS
-.\run-with-env.ps1
-```
+Verify: `curl http://localhost:3099/ping` or `Invoke-WebRequest -Uri http://localhost:3099/ping`
 
 ### Docker Compose
 
