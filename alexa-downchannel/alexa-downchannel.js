@@ -250,8 +250,46 @@ async function buildThermostatStateQueryFromIntrospection() {
   return { baseFields, fragments, propertiesSelection, fullQueryExample };
 }
 
-/** Cached properties selection from introspection (list-thermostats approach). Built once on first state fetch. */
-let cachedPropertiesSelection = null;
+/** Hardcoded GraphQL properties selection (from /introspect; avoids runtime introspection). */
+const THERMOSTAT_PROPERTIES_SELECTION = `name
+            accuracy
+            type
+            ... on ThermostatMode {
+              timeOfSample
+              timeOfLastChange
+              thermostatModeValue
+            }
+            ... on Setpoint {
+              timeOfSample
+              timeOfLastChange
+              deviceNativeScaleValue
+              value { value scale }
+            }
+            ... on TemperatureSensor {
+              timeOfSample
+              timeOfLastChange
+              value { value scale }
+            }
+            ... on HvacAuxiliaryHeaterStage {
+              timeOfSample
+              timeOfLastChange
+              auxiliaryHeaterStageValue { value }
+            }
+            ... on HvacCoolerStage {
+              timeOfSample
+              timeOfLastChange
+              coolerStageValue { value }
+            }
+            ... on HvacFanStage {
+              timeOfSample
+              timeOfLastChange
+              fanStageValue { value }
+            }
+            ... on HvacPrimaryHeaterStage {
+              timeOfSample
+              timeOfLastChange
+              primaryHeaterStageValue { value }
+            }`;
 
 /**
  * Fetches thermostat state. Returns { payload, total_endpoints, thermostats_filtered, state_endpoints_count, graphql_errors }.
@@ -287,18 +325,7 @@ async function fetchThermostatState() {
     return { ...empty, total_endpoints: endpoints.length, thermostats_filtered: 0 };
   }
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
-  if (!cachedPropertiesSelection) {
-    try {
-      const built = await buildThermostatStateQueryFromIntrospection();
-      cachedPropertiesSelection = built.propertiesSelection;
-      log('info', 'Introspected thermostat schema; cached properties selection');
-    } catch (e) {
-      log('warn', 'Introspection failed, falling back to properties { name value }:', e.message);
-      cachedPropertiesSelection = 'name\n            value';
-    }
-  }
-  const propsSel = cachedPropertiesSelection || 'name\n            value';
-  const stateQuery = `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties {\n            ${propsSel}\n          } } } } }`;
+  const stateQuery = `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties {\n            ${THERMOSTAT_PROPERTIES_SELECTION}\n          } } } } }`;
   const stateBody = JSON.stringify({ query: stateQuery });
   const stateRes = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
     method: 'POST',
@@ -317,7 +344,8 @@ async function fetchThermostatState() {
     for (const feat of ep.features || []) {
       for (const prop of feat.properties || []) {
         const v = prop.value;
-        const val = v && typeof v === 'object' && 'value' in v ? v.value : v;
+        const modeVal = prop.thermostatModeValue;
+        const val = modeVal != null ? modeVal : (v && typeof v === 'object' && 'value' in v ? v.value : v);
         const scale = v && typeof v === 'object' ? v.scale : null;
         const numVal = typeof val === 'number' ? val : (val != null ? parseFloat(String(val).replace(/[^\d.]/g, '')) : null);
         const display = val != null ? (scale ? `${val}° ${(scale || '').slice(0, 1)}` : `${val}`) : null;
@@ -400,8 +428,11 @@ function connectDownchannel() {
     ':path': DIRECTIVES_PATH,
     ':method': 'GET',
     'authorization': `Bearer ${bearerToken}`,
-    'user-agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
-    'accept': 'application/json'
+    'cookie': cookieData || '',
+    'user-agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    'accept': 'application/json',
+    'referer': 'https://alexa.amazon.com/',
+    'origin': 'https://alexa.amazon.com'
   };
   const req = client.request(headers);
   downchannelStream = req;

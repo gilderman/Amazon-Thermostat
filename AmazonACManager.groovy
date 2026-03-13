@@ -222,7 +222,7 @@ def createChildDevicesForDriver(thermostats, driverName) {
                 driverName,
                 dni,
                 location.hubs[0].id,
-                [label: "[VIR] ${name}", isComponent: false],
+                [label: "[VIR] ${name}", name: ${name}, isComponent: false],
             )
             dev.updateSetting("acDeviceName", [value: name, type: "string"])
             log.info "✅ Created device: ${dev.displayName} (DNI: ${dni}), acDeviceName: ${name}"
