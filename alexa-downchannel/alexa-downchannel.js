@@ -360,7 +360,7 @@ async function fetchThermostatState() {
     }
     if (state.lowerSetpoint != null && state.upperSetpoint != null) state.target = `${state.lowerSetpoint}°–${state.upperSetpoint}°`;
     const t = thermostats.find(x => x.id === ep.id);
-    if (t) payload.push({ name: t.friendlyName, endpointId: ep.id, ...state });
+    if (t) payload.push({ name: (t.friendlyName || '').trim(), endpointId: ep.id, ...state });
   }
   return {
     payload,

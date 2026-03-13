@@ -275,14 +275,15 @@ def logAllStates(device) {
 
 def updateThermostats(List<Map> dataList) {
     dataList.each { entry ->
-        def name = entry.name
+        def name = (entry.name ?: '').trim()
         def endpointId = entry.endpointId
         def mode = entry.mode?.toLowerCase()
         def temp = entry.currentTemp?.replaceAll(/[^\d.]/, '') as Double
 
-        def child = getChildDevices().find { (it.label ?: '').toLowerCase().endsWith((name ?: '').toLowerCase()) }
+        def child = getChildDevices().find { (it.name ?: '').toLowerCase().endsWith((name ?: '').toLowerCase()) }
         if (!child) {
-            log.warn "No child device found with name '$name'"
+            def existing = getChildDevices().collect { it.name }.join(', ')
+            log.warn "No child device found for '$name'. Existing: [$existing]"
             return
         }
         if (endpointId) {
