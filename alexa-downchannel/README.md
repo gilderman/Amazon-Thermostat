@@ -1,4 +1,4 @@
-# Alexa Thermostat Server
+# Alexa Downchannel Server
 
 Polls Alexa's GraphQL API for thermostat state and pushes updates to Hubitat. Used as a proxy when Hubitat cannot reach Alexa directly (TLS issues).
 

@@ -1,5 +1,5 @@
 ---
-description: Alexa Thermostat Server (Node.js) patterns
+description: Alexa Downchannel Server (alexa-downchannel) patterns
 globs: "alexa-downchannel/**"
 alwaysApply: false
 ---

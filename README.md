@@ -7,13 +7,13 @@ Alexa thermostat integration for Hubitat. Uses the **direct Alexa Smart Home API
 ## How it works
 
 - **Amazon AC Manager** (Hubitat app) polls for thermostat state on a schedule (1–15 min, or 30s fast poll)
-- **Alexa Thermostat Server** (Node.js/Docker) acts as a proxy when Hubitat cannot reach Alexa directly (TLS issues)
+- **Alexa Downchannel Server (alexa-downchannel)** (Node.js/Docker) acts as a proxy when Hubitat cannot reach Alexa directly (TLS issues)
 - **Cookie** sourced from manual paste or a cookie server (Hubitat app `/cookie` or Echo Speaks `/cookieData`)
 - **Commands** (set temp, mode) sent from Hubitat directly to Alexa
 
 ### Polling via proxy
 
-Hubitat's Java HTTP client cannot complete TLS handshakes with `alexa.amazon.com` on some hub firmware versions, causing 408 errors. The [Alexa Thermostat Server](alexa-downchannel/) handles HTTPS and proxies the poll request.
+Hubitat's Java HTTP client cannot complete TLS handshakes with `alexa.amazon.com` on some hub firmware versions, causing 408 errors. The [Alexa Downchannel Server (alexa-downchannel)](alexa-downchannel/) handles HTTPS and proxies the poll request.
 
 ## Setup
 
@@ -31,9 +31,24 @@ docker run -d --name alexa-thermostat \
   ghcr.io/gilderman/amazon-thermostat
 ```
 
-### 2. Install the Hubitat app
+### 2. Install the Hubitat app, driver, and library
 
-Install **Amazon AC Manager** and **Amazon Thermostat** driver from this repo into Hubitat.
+Install in this order (Helper first, since the app includes it):
+
+1. **Helper (Library)** – In Hubitat: *Apps → Add an App → Library* → paste the contents of [AmazonACManagerHelper.groovy](https://raw.githubusercontent.com/gilderman/Amazon-Thermostat/main/AmazonACManagerHelper.groovy). Save as "AmazonACManagerHelper".
+
+2. **Driver** – *Devices → Drivers → Add a Custom Driver* → paste the contents of [AmazonThermostatDriver.groovy](https://raw.githubusercontent.com/gilderman/Amazon-Thermostat/main/AmazonThermostatDriver.groovy). Save as "Amazon Thermostat".
+
+3. **App** – *Apps → Add an App → Custom* → paste the contents of [AmazonACManager.groovy](https://raw.githubusercontent.com/gilderman/Amazon-Thermostat/main/AmazonACManager.groovy). Save as "Amazon AC Manager".
+
+4. **Enable OAuth** – The app uses OAuth for its `/cookie` and `/statusreportfromtheapp` callbacks. In Hubitat: *Settings → OAuth*. For "Amazon AC Manager", enable OAuth.
+
+**Where to find App ID and Access Token** (for `HUBITAT_APP_ID` and `HUBITAT_ACCESS_TOKEN` in the thermostat server):
+
+- **App ID** – Open *Apps → Amazon AC Manager* (click the app name). The App ID is in the browser URL (e.g. `.../app/editor/12345678-xxxx`) or shown on the app’s OAuth/callback section.
+- **Access Token** – After OAuth is enabled, go to *Settings → OAuth*. Under "Amazon AC Manager" you’ll see the access token. Or open the app → its OAuth section shows the token. Copy the full token (no spaces).
+
+Use these values for the server’s `HUBITAT_APP_ID` and `HUBITAT_ACCESS_TOKEN` env vars (see step 1 above).
 
 ### 3. Configure the app
 
@@ -59,7 +74,7 @@ Check Hubitat Live Logs. A successful poll looks like:
 Alexa API (alexa.amazon.com)
     ▲           │  GraphQL poll
     │           ▼
-    │    Alexa Thermostat Server  ◄────  Hubitat (calls /poll)
+    │    Alexa Downchannel Server (alexa-downchannel)  ◄────  Hubitat (calls /poll)
     │      (Node.js, port 3099)              │
     │             │                          │  POST status
     │             ▼                          ▼

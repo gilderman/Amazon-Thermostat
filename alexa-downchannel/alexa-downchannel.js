@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Alexa Thermostat Polling Server
+ * Alexa Downchannel Server (alexa-downchannel)
  *
  * Periodically fetches thermostat state via Alexa's GraphQL API and pushes
  * updates to Hubitat. Cookie is fetched from COOKIE_SERVER_URL (Hubitat /cookie
@@ -467,7 +467,7 @@ const httpServer = http.createServer((req, res) => {
 });
 
 httpServer.listen(PORT, () => {
-  log('info', `Alexa Thermostat Server listening on port ${PORT}`);
+  log('info', `Alexa Downchannel Server listening on port ${PORT}`);
   log('info', `Ping: http://localhost:${PORT}/ping`);
   if (!COOKIE_SERVER_URL) log('warn', 'COOKIE_SERVER_URL not set - cookie fetch will fail');
   if (!HUBITAT_URL || !HUBITAT_APP_ID || !HUBITAT_ACCESS_TOKEN) log('warn', 'HUBITAT_* not set - callback push will fail');
