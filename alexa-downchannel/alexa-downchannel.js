@@ -240,6 +240,66 @@ async function refreshThermostatEndpoints() {
   log('info', `Cached ${thermostats.length} thermostat endpoint(s): ${thermostats.map(t => t.friendlyName).join(', ') || '(none)'}`);
 }
 
+// Cached inline fragments for the state query, built via schema introspection.
+let stateQueryFragments = null;
+
+// Introspect ThermostatMode, Setpoint, TemperatureSensor to discover the exact
+// field names for each concrete type. Builds and caches the inline fragments
+// so the state query is always schema-correct.
+async function buildStateQueryFragments() {
+  log('info', 'Introspecting GraphQL schema for thermostat property types...');
+  const typeNames = ['ThermostatMode', 'Setpoint', 'TemperatureSensor'];
+  const aliases = typeNames.map((n, i) => `t${i}: __type(name: "${n}") { fields { name type { kind name ofType { name kind ofType { name kind } } } } }`).join(' ');
+  const introspectBody = JSON.stringify({ query: `{ ${aliases} }` });
+  const res = await fetchAlexaJson('https://alexa.amazon.com/nexus/v1/graphql', introspectBody);
+  if (!res?.data) {
+    log('warn', 'Schema introspection failed:', JSON.stringify(res).slice(0, 300));
+    return null;
+  }
+
+  // Collect any OBJECT-type field names from the concrete types for a second-pass introspection.
+  const SKIP = new Set(['name', 'error', 'accuracy', 'type']);
+  function unwrap(t) { return (!t || t.kind === 'NON_NULL' || t.kind === 'LIST') ? unwrap(t?.ofType) : t; }
+  const nestedTypeNames = new Set();
+  typeNames.forEach((_, i) => {
+    for (const f of res.data[`t${i}`]?.fields || []) {
+      if (SKIP.has(f.name)) continue;
+      const base = unwrap(f.type);
+      if (base?.kind === 'OBJECT' && base.name) nestedTypeNames.add(base.name);
+    }
+  });
+
+  // Second pass: introspect nested object types (e.g. the temperature value object).
+  const nestedSchema = {};
+  if (nestedTypeNames.size) {
+    const nested = [...nestedTypeNames];
+    const nestedAliases = nested.map((n, i) => `n${i}: __type(name: "${n}") { fields { name } }`).join(' ');
+    const nestedRes = await fetchAlexaJson('https://alexa.amazon.com/nexus/v1/graphql', JSON.stringify({ query: `{ ${nestedAliases} }` }));
+    nested.forEach((n, i) => { nestedSchema[n] = nestedRes?.data?.[`n${i}`]; });
+  }
+
+  // Build one inline fragment per concrete type.
+  const fragments = [];
+  typeNames.forEach((typeName, i) => {
+    const typeInfo = res.data[`t${i}`];
+    if (!typeInfo?.fields) return;
+    const fields = typeInfo.fields
+      .filter(f => !SKIP.has(f.name))
+      .map(f => {
+        const base = unwrap(f.type);
+        if (base?.kind === 'OBJECT' && base.name) {
+          const subFields = (nestedSchema[base.name]?.fields || []).map(nf => nf.name);
+          return subFields.length ? `${f.name} { ${subFields.join(' ')} }` : `${f.name} { value scale }`;
+        }
+        return f.name;
+      });
+    if (fields.length) fragments.push(`... on ${typeName} { ${fields.join(' ')} }`);
+  });
+
+  log('info', 'State query fragments:', fragments.join(' | ') || '(none)');
+  return fragments.length ? fragments : null;
+}
+
 // Fetch current state for the cached thermostat endpoints.
 // Does NOT call listEndpoints for discovery — that's done once at startup.
 async function fetchThermostatState() {
@@ -254,8 +314,16 @@ async function fetchThermostatState() {
   const thermostats = cachedThermostats || [];
   if (!thermostats.length) return [];
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
+  if (!stateQueryFragments) {
+    stateQueryFragments = await buildStateQueryFragments().catch(e => {
+      log('warn', 'Fragment build failed, using fallback:', e.message);
+      return null;
+    });
+  }
+  // Fallback fragments if introspection fails.
+  const fragments = stateQueryFragments || ['... on ThermostatMode { value }', '... on Setpoint { value { value scale } }', '... on TemperatureSensor { value { value scale } }'];
   const stateBody = JSON.stringify({
-    query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name value accuracy } } } } }`
+    query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name ${fragments.join(' ')} } } } } }`
   });
   const stateRes = await fetchAlexaJson('https://alexa.amazon.com/nexus/v1/graphql', stateBody);
   const stateEndpoints = stateRes?.data?.listEndpoints?.endpoints || [];
@@ -480,6 +548,7 @@ async function startDownchannel() {
   // needs to call listEndpoints(all) again — only the targeted state query runs
   // on each directive. The cache is refreshed automatically on Discovery directives.
   await refreshThermostatEndpoints().catch(e => log('warn', 'Initial endpoint discovery failed:', e.message));
+  stateQueryFragments = await buildStateQueryFragments().catch(e => { log('warn', 'Initial schema introspection failed:', e.message); return null; });
   scheduleCookieRefresh();
   connectDownchannel();
 }
