@@ -329,10 +329,13 @@ async function fetchThermostatState() {
   const stateEndpoints = stateRes?.data?.listEndpoints?.endpoints || [];
   if (!stateEndpoints.length) {
     log('warn', 'State query returned 0 endpoints. Raw response:', JSON.stringify(stateRes).slice(0, 500));
+  } else {
+    log('info', 'Raw state response:', JSON.stringify(stateRes?.data?.listEndpoints?.endpoints).slice(0, 2000));
   }
   const payload = [];
   for (const ep of stateEndpoints) {
     const state = { mode: 'off', currentTemp: null, target: null, lowerSetpoint: null, upperSetpoint: null };
+    log('debug', `Raw properties for endpoint ${ep.id}:`, JSON.stringify(ep.features?.flatMap(f => f.properties || []) || []));
     for (const feat of ep.features || []) {
       for (const prop of feat.properties || []) {
         const v = prop.value;

@@ -258,6 +258,7 @@ def statusCallback() {
         return
     }
     def list = payload instanceof List ? payload : [payload]
+    log.debug "statusCallback received ${list.size()} thermostat(s): ${groovy.json.JsonOutput.toJson(list)}"
     if (list.size() != state.totalDevices) {
         log.debug "Received ${list.size()} thermostats (expected ${state.totalDevices})"
     }
