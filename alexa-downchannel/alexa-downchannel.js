@@ -135,18 +135,27 @@ async function fetchThermostatState() {
     body: listBody
   });
   const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
+  log('debug', `listEndpoints returned ${endpoints.length} endpoint(s):`,
+    endpoints.map(ep => `"${ep.friendlyName}" [${ep.displayCategories?.primary?.value || 'NO_CAT'}]`).join(', ') || '(none)');
   const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
   let thermostats = endpoints.filter(ep => {
     const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
     const name = (ep.friendlyName || '').toLowerCase();
     return thermoCategories.includes(cat) || name.includes('thermostat');
   });
+  log('debug', `After category/name filter: ${thermostats.length} thermostat(s)`);
   if (THERMOSTAT_NAMES.length) {
     const targetNames = THERMOSTAT_NAMES.map(n => n.toLowerCase());
+    log('debug', `THERMOSTAT_NAMES filter: looking for [${targetNames.join(', ')}]`);
     thermostats = thermostats.filter(t => targetNames.includes((t.friendlyName || '').toLowerCase()));
+    log('debug', `After THERMOSTAT_NAMES filter: ${thermostats.length} thermostat(s)`);
   }
-  if (!thermostats.length) thermostats = endpoints.filter(ep =>
-    thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()));
+  if (!thermostats.length) {
+    log('warn', `No thermostats matched. endpoints=${endpoints.length}, THERMOSTAT_NAMES=[${THERMOSTAT_NAMES.join(', ')}]. Falling back to category-only filter.`);
+    thermostats = endpoints.filter(ep =>
+      thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()));
+    log('warn', `Fallback category filter: ${thermostats.length} thermostat(s)`);
+  }
   if (!thermostats.length) return [];
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
   const stateBody = JSON.stringify({
@@ -313,6 +322,46 @@ const httpServer = http.createServer((req, res) => {
     refreshCookie().then((ok) => {
       res.statusCode = ok ? 200 : 500;
       res.end(JSON.stringify({ ok }));
+    });
+    return;
+  }
+  if (path === '/debug') {
+    if (!cookieData || !bearerToken) {
+      res.statusCode = 503;
+      res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded.' }));
+      return;
+    }
+    const listBody = JSON.stringify({
+      query: '{ listEndpoints(listEndpointsInput: {}) { endpoints { id friendlyName displayCategories { primary { value } } } } }'
+    });
+    const headers = {
+      'Cookie': cookieData, 'csrf': csrf, 'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
+      'Referer': 'https://alexa.amazon.com/', 'Origin': 'https://alexa.amazon.com'
+    };
+    fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Length': Buffer.byteLength(listBody) },
+      body: listBody
+    }).then(listRes => {
+      const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
+      const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
+      res.statusCode = 200;
+      res.end(JSON.stringify({
+        ok: true,
+        thermostat_names_env: THERMOSTAT_NAMES,
+        total_endpoints: endpoints.length,
+        endpoints: endpoints.map(ep => ({
+          friendlyName: ep.friendlyName,
+          category: ep.displayCategories?.primary?.value || null,
+          matchesCategoryFilter: thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()),
+          matchesNameFilter: (ep.friendlyName || '').toLowerCase().includes('thermostat')
+        }))
+      }));
+    }).catch(e => {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ ok: false, error: e.message }));
     });
     return;
   }
