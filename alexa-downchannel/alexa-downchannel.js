@@ -344,7 +344,7 @@ async function fetchThermostatState() {
         const numVal = typeof val === 'number' ? val : (val != null ? parseFloat(String(val).replace(/[^\d.]/g, '')) : null);
         const display = val != null ? (scale ? `${val}° ${(scale || '').slice(0, 1)}` : `${val}`) : null;
         switch (prop.name) {
-          case 'thermostatMode': state.mode = (val || 'OFF').toString().toLowerCase(); break;
+          case 'thermostatMode': state.mode = (prop.thermostatModeValue || val || 'OFF').toString().toLowerCase(); break;
           case 'temperature': state.currentTemp = display; break;
           case 'targetSetpoint': state.target = display; if (numVal != null) { state.lowerSetpoint = numVal; state.upperSetpoint = numVal; } break;
           case 'lowerSetpoint': state.lowerSetpoint = numVal; break;
