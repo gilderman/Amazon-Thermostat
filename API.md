@@ -1,6 +1,6 @@
 # Alexa API Reference
 
-How this integration uses the Alexa Smart Home and downchannel APIs.
+How this integration uses the Alexa Smart Home GraphQL API.
 
 ---
 
@@ -98,68 +98,6 @@ Content-Type: application/json
 
 ---
 
-## 2. Alexa downchannel (HTTP/2)
+## 2. Thermostat Server (Node.js)
 
-For real-time push notifications, we use Amazon's HTTP/2 downchannel.
-
-- **Host:** `bob-dispatch-prod-na.amazon.com` (NA) or `bob-dispatch-prod-eu.amazon.com` (EU)
-- **Path:** `GET /v20160207/directives`
-- **Auth:** `Authorization: Bearer {token}` (extract `at-main` from cookie, URL-decode)
-
-The connection stays open. Amazon streams directives to the client when devices or account state changes.
-
-### 2.1 What we get from the downchannel
-
-The response body is a stream of **newline-delimited JSON** (NDJSON). Each line is a complete JSON object representing one directive. Amazon sends directives for various events: Smart Home device changes, voice interactions, account updates, etc.
-
-**Transport format:** One JSON object per line, `\n`-separated. Partial lines may arrive; the client buffers and splits on newlines before parsing.
-
-**Example stream:**
-
-```
-{"header":{"namespace":"Alexa.ConnectedHome.Discovery","name":"AddOrUpdateReport"}}
-{"header":{"namespace":"Alexa","name":"Response"}}
-```
-
-### 2.2 Directive payload structure
-
-Each directive is a JSON object. The structure typically includes:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `header` | object | Directive metadata |
-| `header.namespace` | string | e.g. `Alexa.ConnectedHome.Discovery`, `Alexa`, `Com Alexa.SmartHome` |
-| `header.name` | string | Directive type, e.g. `AddOrUpdateReport`, `Response`, `StateReport` |
-| `header.messageId` | string | Unique ID (optional) |
-| `payload` | object | Directive-specific data (optional) |
-
-**Example directive (Smart Home state change):**
-
-```json
-{
-  "header": {
-    "namespace": "Alexa.ConnectedHome.Control",
-    "name": "StateReport",
-    "messageId": "abc-123"
-  },
-  "payload": {
-    "endpoints": []
-  }
-}
-```
-
-**Example directive (discovery/add device):**
-
-```json
-{
-  "header": {
-    "namespace": "Alexa.ConnectedHome.Discovery",
-    "name": "AddOrUpdateReport"
-  },
-  "payload": {}
-}
-```
-
-We do not parse thermostat data from the directive payload. Any received directive is treated as a signal that something may have changed. We then fetch full thermostat state via the GraphQL API (1.1 + 1.2) and push the result to Hubitat.
-
-Node.js supports HTTP/2; Hubitat Groovy does not — hence the separate downchannel server.
+The integration uses a Node.js server that polls Alexa's GraphQL API and pushes state to Hubitat. Hubitat's Java HTTP client cannot complete TLS handshakes with `alexa.amazon.com` on some hub firmware versions, so the server acts as a proxy.

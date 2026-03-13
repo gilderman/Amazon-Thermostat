@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /**
  * Alexa Downchannel Server
  *
@@ -16,7 +16,6 @@ const { URL } = require('url');
 const PORT = parseInt(process.env.PORT || '3099', 10);
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
 const ALEXA_REGION = (process.env.ALEXA_REGION || 'na').toLowerCase();
-const SKIP_DOWNCHANNEL = /^(1|true|yes)$/i.test(process.env.SKIP_DOWNCHANNEL || '');
 const BOB_HOST = ALEXA_REGION === 'eu' ? 'bob-dispatch-prod-eu.amazon.com' : 'bob-dispatch-prod-na.amazon.com';
 const DIRECTIVES_PATH = '/v20160207/directives';
 
@@ -26,43 +25,6 @@ const HUBITAT_APP_ID = process.env.HUBITAT_APP_ID || '';
 const HUBITAT_ACCESS_TOKEN = process.env.HUBITAT_ACCESS_TOKEN || '';
 const THERMOSTAT_NAMES = (process.env.THERMOSTAT_NAMES || '').split(',').map(s => s.trim()).filter(Boolean);
 
-const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
-
-/** Given raw endpoints from listEndpoints, return thermostats matching THERMOSTAT_NAMES or category filter. */
-function filterThermostatsFromEndpoints(endpoints) {
-  let thermostats;
-  if (THERMOSTAT_NAMES.length) {
-    const targetNames = THERMOSTAT_NAMES.map(n => n.trim().toLowerCase());
-    const matched = endpoints.filter(ep => targetNames.includes((ep.friendlyName || '').trim().toLowerCase()));
-    const deduped = new Map();
-    for (const ep of matched) {
-      const key = (ep.friendlyName || '').trim().toLowerCase();
-      const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
-      const existing = deduped.get(key);
-      const existingCat = existing ? (existing.displayCategories?.primary?.value || '').toUpperCase() : '';
-      if (!existing || (thermoCategories.includes(cat) && !thermoCategories.includes(existingCat))) {
-        deduped.set(key, ep);
-      }
-    }
-    thermostats = [...deduped.values()];
-    log('debug', `THERMOSTAT_NAMES filter on all endpoints: found ${thermostats.length} of ${targetNames.length} configured names`);
-    if (!thermostats.length) {
-      log('warn', `No endpoints matched THERMOSTAT_NAMES=[${THERMOSTAT_NAMES.join(', ')}]. Falling back to category filter.`);
-      thermostats = endpoints.filter(ep =>
-        thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()));
-      log('warn', `Fallback category filter: ${thermostats.length} thermostat(s)`);
-    }
-  } else {
-    thermostats = endpoints.filter(ep => {
-      const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
-      const name = (ep.friendlyName || '').toLowerCase();
-      return thermoCategories.includes(cat) || name.includes('thermostat');
-    });
-    log('debug', `Category/name filter: ${thermostats.length} thermostat(s)`);
-  }
-  return thermostats;
-}
-
 let cookieData = null;
 let csrf = '';
 let bearerToken = '';
@@ -70,6 +32,30 @@ let downchannelClient = null;
 let downchannelStream = null;
 let reconnectTimer = null;
 let isShuttingDown = false;
+// Thermostat endpoints cached at startup (and refreshed on discovery directives).
+// This avoids calling listEndpoints (all 439 devices) on every downchannel event.
+let cachedThermostats = null;
+const COOKIE_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
+let cookieRefreshTimer = null;
+// Last-known state per endpoint ID ΓÇö used to suppress no-op pushes to Hubitat.
+const lastKnownState = new Map();
+
+// Returns only thermostats whose state changed since last push, and updates the cache.
+function filterChanged(payload) {
+  const changed = [];
+  for (const t of payload) {
+    const prev = lastKnownState.get(t.endpointId);
+    if (!prev ||
+        prev.mode !== t.mode ||
+        prev.currentTemp !== t.currentTemp ||
+        prev.lowerSetpoint !== t.lowerSetpoint ||
+        prev.upperSetpoint !== t.upperSetpoint) {
+      lastKnownState.set(t.endpointId, { mode: t.mode, currentTemp: t.currentTemp, lowerSetpoint: t.lowerSetpoint, upperSetpoint: t.upperSetpoint });
+      changed.push(t);
+    }
+  }
+  return changed;
+}
 
 function log(level, ...args) {
   const levels = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -108,7 +94,9 @@ async function fetchJson(url, options = {}) {
       res.on('data', (ch) => { data += ch; });
       res.on('end', () => {
         if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
+          const err = new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`);
+          err.status = res.statusCode;
+          reject(err);
           return;
         }
         try {
@@ -150,9 +138,39 @@ async function refreshCookie() {
   }
 }
 
-const ALEXA_GRAPHQL = 'https://alexa.amazon.com/nexus/v1/graphql';
+// Wraps fetchJson for Alexa API calls: rebuilds auth headers and retries once on 401.
+async function fetchAlexaJson(url, body) {
+  const makeOpts = () => {
+    const hdrs = alexaHeaders();
+    return { method: 'POST', headers: { ...hdrs, 'Content-Length': Buffer.byteLength(body) }, body };
+  };
+  try {
+    return await fetchJson(url, makeOpts());
+  } catch (e) {
+    if (e.status === 401) {
+      log('info', 'Alexa API returned 401 ΓÇö refreshing cookie and retrying');
+      const ok = await refreshCookie();
+      if (!ok) throw new Error('Cookie refresh failed after 401');
+      return await fetchJson(url, makeOpts());
+    }
+    throw e;
+  }
+}
 
-function getAlexaHeaders() {
+function scheduleCookieRefresh() {
+  if (cookieRefreshTimer) clearInterval(cookieRefreshTimer);
+  cookieRefreshTimer = setInterval(async () => {
+    log('info', 'Periodic cookie refresh');
+    const ok = await refreshCookie();
+    // If cookie changed, reconnect downchannel so it uses the new bearer token.
+    if (ok && downchannelStream) {
+      log('info', 'Cookie refreshed ΓÇö reconnecting downchannel with new token');
+      connectDownchannel();
+    }
+  }, COOKIE_REFRESH_INTERVAL_MS);
+}
+
+function alexaHeaders() {
   return {
     'Cookie': cookieData,
     'csrf': csrf,
@@ -164,191 +182,88 @@ function getAlexaHeaders() {
   };
 }
 
-/** Introspect GraphQL types (list-thermostats approach). Returns { typeName: typeInfo, ... }. */
-async function introspectTypes(typeNames) {
-  const headers = getAlexaHeaders();
-  const fragments = typeNames.map(
-    (t, i) => `t${i}: __type(name: "${t}") { kind fields { name type { name kind ofType { name kind } } } enumValues { name } possibleTypes { name kind } }`
-  ).join('\n  ');
-  const query = `{ ${fragments} }`;
-  const body = JSON.stringify({ query });
-  const res = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
-    method: 'POST',
-    headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
-    body
-  });
-  const result = {};
-  typeNames.forEach((t, i) => { result[t] = res?.data?.[`t${i}`]; });
-  return result;
-}
-
-/** Build thermostat state query from schema (list-thermostats approach). Returns { queryTemplate, fullQueryExample }. */
-async function buildThermostatStateQueryFromIntrospection() {
-  const concreteTypeNames = [
-    'ThermostatMode', 'Setpoint', 'TemperatureSensor',
-    'HvacAuxiliaryHeaterStage', 'HvacCoolerStage', 'HvacFanStage', 'HvacPrimaryHeaterStage',
-  ];
-  const schema = await introspectTypes(['FeatureProperty', ...concreteTypeNames]);
-
-  const BASE_SKIP = new Set(['error']);
-  const baseFields = (schema.FeatureProperty?.fields || [])
-    .filter(f => !BASE_SKIP.has(f.name) && (f.type?.kind === 'SCALAR' || f.type?.kind === 'ENUM'))
-    .map(f => f.name)
-    .join('\n            ') || 'name type';
-
-  const INTERFACE_FIELDS = new Set(['name', 'error', 'accuracy', 'type']);
-  const nestedTypeNames = new Set();
-  for (const typeName of concreteTypeNames) {
-    const typeInfo = schema[typeName];
-    if (!typeInfo?.fields) continue;
-    for (const f of typeInfo.fields) {
-      if (!INTERFACE_FIELDS.has(f.name) && f.type?.kind === 'OBJECT' && f.type?.name) {
-        nestedTypeNames.add(f.type.name);
-      }
-    }
-  }
-
-  const nestedSchema = nestedTypeNames.size > 0 ? await introspectTypes([...nestedTypeNames]) : {};
-
-  const fragments = [];
-  for (const typeName of concreteTypeNames) {
-    const typeInfo = schema[typeName];
-    if (!typeInfo?.fields) continue;
-    const extraFields = typeInfo.fields.filter(f => !INTERFACE_FIELDS.has(f.name));
-    if (extraFields.length === 0) continue;
-
-    const fieldSelections = extraFields.map(f => {
-      const kind = f.type?.kind;
-      const ofKind = f.type?.ofType?.kind;
-      if (kind === 'SCALAR' || kind === 'ENUM' || ofKind === 'SCALAR' || ofKind === 'ENUM') {
-        return f.name;
-      }
-      if (kind === 'OBJECT' && f.type?.name) {
-        const nestedFields = (nestedSchema[f.type.name]?.fields || []).map(nf => nf.name);
-        if (nestedFields.length > 0) return `${f.name} { ${nestedFields.join(' ')} }`;
-      }
-      return `${f.name} { value }`;
-    });
-
-    fragments.push(`... on ${typeName} {\n              ${fieldSelections.join('\n              ')}\n            }`);
-  }
-
-  const propertiesSelection = [baseFields, ...fragments].join('\n            ');
-  const fullQueryExample = `{
-  listEndpoints(listEndpointsInput: { endpointIds: ["ID1", "ID2"] }) {
-    endpoints {
-      id
-      features {
-        name
-        properties {
-            ${propertiesSelection}
-        }
-      }
-    }
-  }
-}`;
-  return { baseFields, fragments, propertiesSelection, fullQueryExample };
-}
-
-/** Hardcoded GraphQL properties selection (from /introspect; avoids runtime introspection). */
-const THERMOSTAT_PROPERTIES_SELECTION = `name
-            accuracy
-            type
-            ... on ThermostatMode {
-              timeOfSample
-              timeOfLastChange
-              thermostatModeValue
-            }
-            ... on Setpoint {
-              timeOfSample
-              timeOfLastChange
-              deviceNativeScaleValue
-              value { value scale }
-            }
-            ... on TemperatureSensor {
-              timeOfSample
-              timeOfLastChange
-              value { value scale }
-            }
-            ... on HvacAuxiliaryHeaterStage {
-              timeOfSample
-              timeOfLastChange
-              auxiliaryHeaterStageValue { value }
-            }
-            ... on HvacCoolerStage {
-              timeOfSample
-              timeOfLastChange
-              coolerStageValue { value }
-            }
-            ... on HvacFanStage {
-              timeOfSample
-              timeOfLastChange
-              fanStageValue { value }
-            }
-            ... on HvacPrimaryHeaterStage {
-              timeOfSample
-              timeOfLastChange
-              primaryHeaterStageValue { value }
-            }`;
-
-/**
- * Fetches thermostat state. Returns { payload, total_endpoints, thermostats_filtered, state_endpoints_count, graphql_errors }.
- * Uses the same flow for /poll and /debug so both return consistent results.
- */
-async function fetchThermostatState() {
-  const empty = { payload: [], total_endpoints: 0, thermostats_filtered: 0, state_endpoints_count: 0, graphql_errors: null };
+// Discover which endpoints are thermostats and cache them.
+// Called once at startup and whenever Alexa pushes a Discovery/AddOrUpdateReport directive.
+async function refreshThermostatEndpoints() {
   if (!cookieData || !bearerToken) {
-    log('warn', 'fetchThermostatState: cookie not loaded, returning empty. Check COOKIE_SERVER_URL and /ping.');
-    return empty;
+    log('warn', 'refreshThermostatEndpoints: cookie not loaded');
+    return;
   }
-  const headers = {
-    'Cookie': cookieData,
-    'csrf': csrf,
-    'Accept': 'application/json',
-    'Content-Type': 'application/json',
-    'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
-    'Referer': 'https://alexa.amazon.com/',
-    'Origin': 'https://alexa.amazon.com'
-  };
-  const listBody = JSON.stringify({
+  const body = JSON.stringify({
     query: '{ listEndpoints(listEndpointsInput: {}) { endpoints { id friendlyName displayCategories { primary { value } } } } }'
   });
-  const listRes = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
-    method: 'POST',
-    headers: { ...headers, 'Content-Length': Buffer.byteLength(listBody) },
-    body: listBody
-  });
+  const listRes = await fetchAlexaJson('https://alexa.amazon.com/nexus/v1/graphql', body);
   const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
-  log('debug', `listEndpoints returned ${endpoints.length} endpoint(s) -> ${THERMOSTAT_NAMES.length ? `${THERMOSTAT_NAMES.join(', ')}` : 'category filter'}`);
-  const thermostats = filterThermostatsFromEndpoints(endpoints);
-  if (!thermostats.length) {
-    return { ...empty, total_endpoints: endpoints.length, thermostats_filtered: 0 };
+  log('debug', `listEndpoints returned ${endpoints.length} endpoint(s):`,
+    endpoints.map(ep => `"${ep.friendlyName}" [${ep.displayCategories?.primary?.value || 'NO_CAT'}]`).join(', ') || '(none)');
+  const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
+  let thermostats;
+  if (THERMOSTAT_NAMES.length) {
+    // When names are explicitly configured, match by name across ALL endpoints ΓÇö
+    // don't require a THERMOSTAT category (Alexa sometimes reports these as INTERIOR_BLIND etc.)
+    // Trim names to handle trailing spaces in Alexa's friendly names.
+    // When multiple endpoints share the same name, prefer THERMOSTAT/TEMPERATURE_SENSOR category.
+    const targetNames = THERMOSTAT_NAMES.map(n => n.trim().toLowerCase());
+    const matched = endpoints.filter(ep => targetNames.includes((ep.friendlyName || '').trim().toLowerCase()));
+    const deduped = new Map();
+    for (const ep of matched) {
+      const key = (ep.friendlyName || '').trim().toLowerCase();
+      const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
+      const existing = deduped.get(key);
+      const existingCat = existing ? (existing.displayCategories?.primary?.value || '').toUpperCase() : '';
+      if (!existing || (thermoCategories.includes(cat) && !thermoCategories.includes(existingCat))) {
+        deduped.set(key, ep);
+      }
+    }
+    thermostats = [...deduped.values()];
+    log('debug', `THERMOSTAT_NAMES filter on all endpoints: found ${thermostats.length} of ${targetNames.length} configured names`);
+    if (!thermostats.length) {
+      log('warn', `No endpoints matched THERMOSTAT_NAMES=[${THERMOSTAT_NAMES.join(', ')}]. Falling back to category filter.`);
+      thermostats = endpoints.filter(ep =>
+        thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()));
+      log('warn', `Fallback category filter: ${thermostats.length} thermostat(s)`);
+    }
+  } else {
+    thermostats = endpoints.filter(ep => {
+      const cat = (ep.displayCategories?.primary?.value || '').toUpperCase();
+      const name = (ep.friendlyName || '').toLowerCase();
+      return thermoCategories.includes(cat) || name.includes('thermostat');
+    });
+    log('debug', `Category/name filter: ${thermostats.length} thermostat(s)`);
   }
+  cachedThermostats = thermostats;
+  log('info', `Cached ${thermostats.length} thermostat endpoint(s): ${thermostats.map(t => t.friendlyName).join(', ') || '(none)'}`);
+}
+
+// Fetch current state for the cached thermostat endpoints.
+// Does NOT call listEndpoints for discovery ΓÇö that's done once at startup.
+async function fetchThermostatState() {
+  if (!cookieData || !bearerToken) {
+    log('warn', 'fetchThermostatState: cookie not loaded, returning empty. Check COOKIE_SERVER_URL and /ping.');
+    return [];
+  }
+  if (!cachedThermostats) {
+    log('info', 'Thermostat endpoints not cached yet ΓÇö running discovery now');
+    await refreshThermostatEndpoints();
+  }
+  const thermostats = cachedThermostats || [];
+  if (!thermostats.length) return [];
   const ids = thermostats.map(t => `"${t.id}"`).join(', ');
-  const stateQuery = `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties {\n            ${THERMOSTAT_PROPERTIES_SELECTION}\n          } } } } }`;
-  const stateBody = JSON.stringify({ query: stateQuery });
-  const stateRes = await fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
-    method: 'POST',
-    headers: { ...headers, 'Content-Length': Buffer.byteLength(stateBody) },
-    body: stateBody
+  const stateBody = JSON.stringify({
+    query: `{ listEndpoints(listEndpointsInput: { endpointIds: [${ids}] }) { endpoints { id features { name properties { name ... on ThermostatMode { value } ... on Setpoint { value { value scale } } ... on TemperatureSensor { value { value scale } } } } } } }`
   });
+  const stateRes = await fetchAlexaJson('https://alexa.amazon.com/nexus/v1/graphql', stateBody);
   const stateEndpoints = stateRes?.data?.listEndpoints?.endpoints || [];
-  const gqlErrors = stateRes?.errors;
-  if (gqlErrors?.length) log('warn', 'GraphQL state query errors:', JSON.stringify(gqlErrors).slice(0, 300));
-  if (!stateEndpoints.length && thermostats.length) {
-    log('warn', `State query returned 0 endpoints for ${thermostats.length} thermostat(s). IDs: ${thermostats.map(t => t.id).slice(0, 3).join(', ')}...`);
-  }
   const payload = [];
   for (const ep of stateEndpoints) {
     const state = { mode: 'off', currentTemp: null, target: null, lowerSetpoint: null, upperSetpoint: null };
     for (const feat of ep.features || []) {
       for (const prop of feat.properties || []) {
         const v = prop.value;
-        const modeVal = prop.thermostatModeValue;
-        const val = modeVal != null ? modeVal : (v && typeof v === 'object' && 'value' in v ? v.value : v);
+        const val = v && typeof v === 'object' && 'value' in v ? v.value : v;
         const scale = v && typeof v === 'object' ? v.scale : null;
         const numVal = typeof val === 'number' ? val : (val != null ? parseFloat(String(val).replace(/[^\d.]/g, '')) : null);
-        const display = val != null ? (scale ? `${val}° ${(scale || '').slice(0, 1)}` : `${val}`) : null;
+        const display = val != null ? (scale ? `${val}┬░ ${(scale || '').slice(0, 1)}` : `${val}`) : null;
         switch (prop.name) {
           case 'thermostatMode': state.mode = (val || 'OFF').toString().toLowerCase(); break;
           case 'temperature': state.currentTemp = display; break;
@@ -358,17 +273,11 @@ async function fetchThermostatState() {
         }
       }
     }
-    if (state.lowerSetpoint != null && state.upperSetpoint != null) state.target = `${state.lowerSetpoint}°–${state.upperSetpoint}°`;
+    if (state.lowerSetpoint != null && state.upperSetpoint != null) state.target = `${state.lowerSetpoint}┬░ΓÇô${state.upperSetpoint}┬░`;
     const t = thermostats.find(x => x.id === ep.id);
-    if (t) payload.push({ name: (t.friendlyName || '').trim(), endpointId: ep.id, ...state });
+    if (t) payload.push({ name: t.friendlyName, endpointId: ep.id, ...state });
   }
-  return {
-    payload,
-    total_endpoints: endpoints.length,
-    thermostats_filtered: thermostats.length,
-    state_endpoints_count: stateEndpoints.length,
-    graphql_errors: gqlErrors || null
-  };
+  return payload;
 }
 
 async function pushToHubitat(payload) {
@@ -392,13 +301,67 @@ async function pushToHubitat(payload) {
   });
 }
 
-async function onDirectiveReceived() {
+// Namespaces (lowercased prefix match) that indicate thermostat state may have changed.
+// Anything else (audio, notifications, speech, etc.) is ignored.
+const THERMOSTAT_NAMESPACES = [
+  'alexa.thermostatcontroller',
+  'alexa.temperaturesensor',
+  'alexa.endpointhealth',
+  'alexa.connectedhome.control',
+  'alexa.connectedhome.query',
+  'alexa.connectedhome.discovery',
+  'alexa.discovery',
+];
+
+function isThermostatDirective(directive) {
+  const ns = (
+    directive?.directive?.header?.namespace ||
+    directive?.header?.namespace ||
+    directive?.namespace || ''
+  ).toLowerCase();
+
+  // Always handle discovery/device-list changes
+  if (/discovery|addorupdate/i.test(ns)) return true;
+
+  // Namespace whitelist
+  if (THERMOSTAT_NAMESPACES.some(n => ns.startsWith(n))) return true;
+
+  // If we have cached endpoints, check whether this directive targets one of them
+  const endpointId =
+    directive?.directive?.endpoint?.endpointId ||
+    directive?.endpoint?.endpointId || '';
+  if (endpointId && cachedThermostats?.some(t => t.id === endpointId)) return true;
+
+  // No namespace at all ΓÇö process to be safe (e.g. keepalive ping objects)
+  if (!ns) return true;
+
+  log('debug', `Skipping non-thermostat directive: ${ns}`);
+  return false;
+}
+
+async function onDirectiveReceived(directive) {
+  if (!isThermostatDirective(directive)) return;
+
+  // If Alexa is reporting a device list change, refresh our cached endpoint IDs.
+  // State directives (mode/temp changes) only need the state query ΓÇö no re-discovery.
+  const namespace = directive?.directive?.header?.namespace
+    || directive?.header?.namespace
+    || directive?.namespace
+    || '';
+  const isDiscovery = /discovery|addorupdate/i.test(namespace);
+  if (isDiscovery) {
+    log('info', `Discovery directive received (${namespace}) ΓÇö refreshing thermostat endpoint cache`);
+    try { await refreshThermostatEndpoints(); } catch (e) { log('warn', 'Endpoint refresh failed:', e.message); }
+  }
   log('debug', 'Directive received, fetching thermostat state');
   try {
-    const { payload } = await fetchThermostatState();
-    if (payload.length) {
-      await pushToHubitat(payload);
-      log('info', `Pushed ${payload.length} thermostat(s) to Hubitat`);
+    const payload = await fetchThermostatState();
+    const changed = filterChanged(payload);
+    if (changed.length) {
+      await pushToHubitat(changed);
+      log('info', `Pushed ${changed.length} thermostat(s) to Hubitat (${payload.length - changed.length} unchanged)`);
+    } else {
+      log('debug', 'No state changes ΓÇö skipping Hubitat push');
     }
   } catch (e) {
     log('warn', 'State fetch/push failed:', e.message);
@@ -406,7 +369,7 @@ async function onDirectiveReceived() {
 }
 
 function connectDownchannel() {
-  if (isShuttingDown || SKIP_DOWNCHANNEL || !bearerToken) return;
+  if (isShuttingDown || !bearerToken) return;
   if (downchannelClient) {
     try { downchannelClient.close(); } catch {}
     downchannelClient = null;
@@ -428,18 +391,23 @@ function connectDownchannel() {
     ':path': DIRECTIVES_PATH,
     ':method': 'GET',
     'authorization': `Bearer ${bearerToken}`,
-    'cookie': cookieData || '',
-    'user-agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-    'accept': 'application/json',
-    'referer': 'https://alexa.amazon.com/',
-    'origin': 'https://alexa.amazon.com'
+    'user-agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
+    'accept': 'application/json'
   };
   const req = client.request(headers);
   downchannelStream = req;
   let buffer = '';
   req.on('response', (headers) => {
     const status = headers[':status'];
-    if (status !== 200) log('warn', 'Downchannel response status:', status);
+    if (status === 401) {
+      log('warn', 'Downchannel got 401 ΓÇö refreshing cookie then reconnecting');
+      refreshCookie().then((ok) => {
+        if (ok) connectDownchannel();
+        else scheduleReconnect();
+      });
+    } else if (status !== 200) {
+      log('warn', 'Downchannel response status:', status);
+    }
   });
   req.on('data', (chunk) => {
     buffer += chunk.toString();
@@ -451,7 +419,7 @@ function connectDownchannel() {
         const obj = JSON.parse(line);
         if (obj) {
           log('debug', 'Directive:', JSON.stringify(obj).slice(0, 200));
-          onDirectiveReceived();
+          onDirectiveReceived(obj);
         }
       } catch {}
     }
@@ -468,11 +436,10 @@ function connectDownchannel() {
 }
 
 function scheduleReconnect() {
-  if (SKIP_DOWNCHANNEL) return;
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    if (isShuttingDown || SKIP_DOWNCHANNEL) return;
+    if (isShuttingDown) return;
     log('info', 'Reconnecting downchannel...');
     connectDownchannel();
   }, 10000);
@@ -484,10 +451,11 @@ async function startDownchannel() {
     log('error', 'Cannot start without valid cookie. Check COOKIE_SERVER_URL.');
     return;
   }
-  if (SKIP_DOWNCHANNEL) {
-    log('info', 'Downchannel disabled (SKIP_DOWNCHANNEL=1). Polling only.');
-    return;
-  }
+  // Discover thermostats once at startup so the downchannel push path never
+  // needs to call listEndpoints(all) again ΓÇö only the targeted state query runs
+  // on each directive. The cache is refreshed automatically on Discovery directives.
+  await refreshThermostatEndpoints().catch(e => log('warn', 'Initial endpoint discovery failed:', e.message));
+  scheduleCookieRefresh();
   connectDownchannel();
 }
 
@@ -511,40 +479,39 @@ const httpServer = http.createServer((req, res) => {
     });
     return;
   }
-  if (path === '/introspect') {
-    if (!cookieData || !bearerToken) {
-      res.statusCode = 503;
-      res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded. Call /refresh or check COOKIE_SERVER_URL.' }));
-      return;
-    }
-    buildThermostatStateQueryFromIntrospection().then((result) => {
-      res.statusCode = 200;
-      res.end(JSON.stringify({
-        ok: true,
-        fullQueryExample: result.fullQueryExample,
-        propertiesSelection: result.propertiesSelection,
-        baseFields: result.baseFields,
-        fragments: result.fragments
-      }, null, 2));
-    }).catch(e => {
-      res.statusCode = 500;
-      res.end(JSON.stringify({ ok: false, error: e.message }));
-    });
-    return;
-  }
   if (path === '/debug') {
     if (!cookieData || !bearerToken) {
       res.statusCode = 503;
       res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded.' }));
       return;
     }
-    fetchThermostatState().then((result) => {
+    const listBody = JSON.stringify({
+      query: '{ listEndpoints(listEndpointsInput: {}) { endpoints { id friendlyName displayCategories { primary { value } } } } }'
+    });
+    const headers = {
+      'Cookie': cookieData, 'csrf': csrf, 'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
+      'Referer': 'https://alexa.amazon.com/', 'Origin': 'https://alexa.amazon.com'
+    };
+    fetchJson('https://alexa.amazon.com/nexus/v1/graphql', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Length': Buffer.byteLength(listBody) },
+      body: listBody
+    }).then(listRes => {
+      const endpoints = listRes?.data?.listEndpoints?.endpoints || [];
+      const thermoCategories = ['THERMOSTAT', 'TEMPERATURE_SENSOR'];
       res.statusCode = 200;
       res.end(JSON.stringify({
         ok: true,
-        _config: { thermostat_names_env: THERMOSTAT_NAMES },
-        ...result,
-        thermostats: result.payload
+        thermostat_names_env: THERMOSTAT_NAMES,
+        total_endpoints: endpoints.length,
+        endpoints: endpoints.map(ep => ({
+          friendlyName: ep.friendlyName,
+          category: ep.displayCategories?.primary?.value || null,
+          matchesCategoryFilter: thermoCategories.includes((ep.displayCategories?.primary?.value || '').toUpperCase()),
+          matchesNameFilter: (ep.friendlyName || '').toLowerCase().includes('thermostat')
+        }))
       }));
     }).catch(e => {
       res.statusCode = 500;
@@ -558,12 +525,13 @@ const httpServer = http.createServer((req, res) => {
       res.end(JSON.stringify({ ok: false, error: 'Cookie not loaded. Call /refresh or check COOKIE_SERVER_URL.' }));
       return;
     }
-    fetchThermostatState().then(async ({ payload }) => {
-      if (payload.length) {
-        pushToHubitat(payload).catch(e => log('warn', 'Hubitat push failed:', e.message));
+    fetchThermostatState().then(async (payload) => {
+      const changed = filterChanged(payload);
+      if (changed.length) {
+        pushToHubitat(changed).catch(e => log('warn', 'Hubitat push failed:', e.message));
       }
       res.statusCode = 200;
-      res.end(JSON.stringify({ ok: true, thermostats: payload }));
+      res.end(JSON.stringify({ ok: true, thermostats: payload, pushed: changed.length }));
     }).catch(e => {
       log('error', 'Poll failed:', e.message);
       res.statusCode = 500;
@@ -578,7 +546,6 @@ const httpServer = http.createServer((req, res) => {
 httpServer.listen(PORT, () => {
   log('info', `Alexa Downchannel Server listening on port ${PORT}`);
   log('info', `Ping: http://localhost:${PORT}/ping`);
-  if (SKIP_DOWNCHANNEL) log('info', 'Downchannel disabled (SKIP_DOWNCHANNEL=1). Polling only.');
   if (!COOKIE_SERVER_URL) log('warn', 'COOKIE_SERVER_URL not set - cookie fetch will fail');
   if (!HUBITAT_URL || !HUBITAT_APP_ID || !HUBITAT_ACCESS_TOKEN) log('warn', 'HUBITAT_* not set - callback push will fail');
   startDownchannel();
@@ -587,6 +554,7 @@ httpServer.listen(PORT, () => {
 process.on('SIGINT', () => {
   isShuttingDown = true;
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (cookieRefreshTimer) clearInterval(cookieRefreshTimer);
   if (downchannelClient) downchannelClient.close();
   httpServer.close();
   process.exit(0);

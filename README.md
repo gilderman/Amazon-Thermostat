@@ -2,37 +2,33 @@
 
 Alexa thermostat integration for Hubitat. Uses the **direct Alexa Smart Home API**.
 
-📖 **[API.md](API.md)** – Full API reference: Alexa GraphQL, downchannel, Hubitat endpoints, payloads.
+📖 **[API.md](API.md)** – API reference: Alexa GraphQL, Hubitat endpoints, payloads.
 
 ## How it works
 
-- **Amazon AC Manager** polls for thermostat state on a schedule (1–15 min, or 30s fast poll), or receives real-time push updates via the downchannel server
-- **Cookie** sourced from manual paste or a local cookie server (e.g. Echo Speaks Docker)
-- **Commands** (set temp, mode) sent from Hubitat to Alexa via the downchannel server proxy
+- **Amazon AC Manager** (Hubitat app) polls for thermostat state on a schedule (1–15 min, or 30s fast poll)
+- **Alexa Thermostat Server** (Node.js/Docker) acts as a proxy when Hubitat cannot reach Alexa directly (TLS issues)
+- **Cookie** sourced from manual paste or a cookie server (Hubitat app `/cookie` or Echo Speaks `/cookieData`)
+- **Commands** (set temp, mode) sent from Hubitat directly to Alexa
 
-### Polling vs real-time (downchannel)
+### Polling via proxy
 
-| Mode | Latency | Requires |
-|------|---------|----------|
-| **Polling via proxy** | 1–15 min (or 30s fast poll) | Downchannel server + `Downchannel server URL` set in app |
-| **Real-time push** | Instant | Downchannel server (Docker/Node) |
-
-> **Why the proxy?** Hubitat's Java HTTP client cannot complete TLS handshakes with `alexa.amazon.com` on some hub firmware versions, causing immediate 408 errors. All Alexa API calls are routed through the local [Alexa Downchannel Server](alexa-downchannel/) (Node.js/Docker), which handles HTTPS without issue.
+Hubitat's Java HTTP client cannot complete TLS handshakes with `alexa.amazon.com` on some hub firmware versions, causing 408 errors. The [Alexa Thermostat Server](alexa-downchannel/) handles HTTPS and proxies the poll request.
 
 ## Setup
 
-### 1. Run the downchannel server
+### 1. Run the thermostat server
 
-The downchannel server handles all communication with the Alexa API. See [alexa-downchannel/README.md](alexa-downchannel/README.md) for full setup. Quick start:
+The server handles communication with the Alexa API. See [alexa-downchannel/README.md](alexa-downchannel/README.md) for full setup. Quick start:
 
 ```bash
-docker run -d --name alexa-downchannel \
+docker run -d --name alexa-thermostat \
   -e COOKIE_SERVER_URL="http://YOUR_ECHO_SPEAKS_HOST:8091/cookieData" \
   -e HUBITAT_URL="http://YOUR_HUBITAT_IP" \
   -e HUBITAT_APP_ID="YOUR_APP_ID" \
   -e HUBITAT_ACCESS_TOKEN="YOUR_TOKEN" \
   -p 3099:3099 \
-  ghcr.io/gilderman/alexa-downchannel
+  ghcr.io/gilderman/amazon-thermostat
 ```
 
 ### 2. Install the Hubitat app
@@ -41,8 +37,8 @@ Install **Amazon AC Manager** and **Amazon Thermostat** driver from this repo in
 
 ### 3. Configure the app
 
-1. **Cookie server URL** – e.g. `http://YOUR_ECHO_SPEAKS_HOST:8091/cookieData`
-2. **Downchannel server URL** – e.g. `http://YOUR_DOWNCHANNEL_HOST:3099` (routes poll and commands through the local proxy)
+1. **Cookie server URL** – e.g. `http://YOUR_ECHO_SPEAKS_HOST:8091/cookieData` (or omit to use Hubitat app `/cookie`)
+2. **Downchannel server URL** – e.g. `http://YOUR_SERVER_HOST:3099` (routes poll through the proxy when Hubitat can't reach Alexa)
 3. **Thermostat names** – comma-separated, exactly as they appear in the Alexa app
 4. Click **Test Cookie Fetch** to verify connectivity
 5. Click **Create Devices** to create child devices
@@ -53,7 +49,7 @@ Install **Amazon AC Manager** and **Amazon Thermostat** driver from this repo in
 Check Hubitat Live Logs. A successful poll looks like:
 
 ```
-[Poll] Using downchannel proxy: http://192.168.21.100:3099/poll (timeout 30s)
+[Poll] Using proxy: http://192.168.21.100:3099/poll (timeout 30s)
 [Poll] Proxy callback: HTTP 200
 ```
 
@@ -61,16 +57,11 @@ Check Hubitat Live Logs. A successful poll looks like:
 
 ```
 Alexa API (alexa.amazon.com)
-        │  HTTP/2 downchannel          │  GraphQL (poll / commands)
-        ▼                              ▼
-Alexa Downchannel Server  ◄────────  Hubitat (Amazon AC Manager)
-  (Node.js, port 3099)                    calls /poll, /command
-        │
-        │  POST /statusreportfromtheapp
-        ▼
-  Hubitat (real-time push)
+    ▲           │  GraphQL poll
+    │           ▼
+    │    Alexa Thermostat Server  ◄────  Hubitat (calls /poll)
+    │      (Node.js, port 3099)              │
+    │             │                          │  POST status
+    │             ▼                          ▼
+    │       Hubitat (state updates)     Commands go direct
 ```
-
-- **Real-time**: Alexa pushes directives over HTTP/2 → Node.js server fetches state → pushes to Hubitat
-- **Polling**: Hubitat calls `/poll` on the Node.js server → server queries Alexa → returns state
-- **Commands**: Hubitat calls `/command` on the Node.js server → server sends GraphQL mutation to Alexa

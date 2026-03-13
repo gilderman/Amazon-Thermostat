@@ -1,7 +1,7 @@
 {
   "name": "alexa-downchannel",
   "version": "1.0.0",
-  "description": "Alexa downchannel server for real-time thermostat updates to Hubitat",
+  "description": "Alexa thermostat poll proxy — fetches state from Alexa GraphQL and pushes to Hubitat",
   "main": "alexa-downchannel.js",
   "scripts": {
     "start": "node alexa-downchannel.js",
@@ -10,7 +10,7 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": ["alexa", "hubitat", "thermostat", "downchannel"],
+  "keywords": ["alexa", "hubitat", "thermostat"],
   "author": "Ilia Gilderman",
   "license": "MIT"
 }
